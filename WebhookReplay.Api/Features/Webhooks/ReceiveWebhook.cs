@@ -1,0 +1,79 @@
+using System.Text;
+using System.Text.Json;
+using Npgsql;
+using NpgsqlTypes;
+
+namespace WebhookReplay.Api.Features.Webhooks;
+
+public static class ReceiveWebhook
+{
+    private const string InsertSql = """
+        INSERT INTO webhook_requests (id, endpoint_id, method, headers, body_text, body_json, received_at)
+        VALUES (@id, @endpoint_id, @method, @headers, @body_text, @body_json, @received_at)
+        """;
+
+    public static async Task<IResult> HandleAsync(
+        string slug,
+        HttpRequest request,
+        NpgsqlDataSource dataSource,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+
+        var endpointId = await FindEndpointIdAsync(connection, slug, cancellationToken);
+        if (endpointId is null)
+        {
+            return Results.NotFound(new { error = $"Unknown endpoint '{slug}'." });
+        }
+
+        var bodyText = await ReadBodyAsync(request, cancellationToken);
+        var headersJson = JsonSerializer.Serialize(
+            request.Headers.ToDictionary(header => header.Key, header => header.Value.ToArray()));
+
+        await using var command = new NpgsqlCommand(InsertSql, connection);
+        command.Parameters.Add("id", NpgsqlDbType.Uuid).Value = Guid.CreateVersion7();
+        command.Parameters.Add("endpoint_id", NpgsqlDbType.Uuid).Value = endpointId.Value;
+        command.Parameters.Add("method", NpgsqlDbType.Text).Value = request.Method;
+        command.Parameters.Add("headers", NpgsqlDbType.Jsonb).Value = headersJson;
+        command.Parameters.Add("body_text", NpgsqlDbType.Text).Value = bodyText;
+        command.Parameters.Add("body_json", NpgsqlDbType.Jsonb).Value =
+            IsValidJson(bodyText) ? bodyText : DBNull.Value;
+        command.Parameters.Add("received_at", NpgsqlDbType.TimestampTz).Value = DateTime.UtcNow;
+        await command.ExecuteNonQueryAsync(cancellationToken);
+
+        return Results.NoContent();
+    }
+
+    private static async Task<Guid?> FindEndpointIdAsync(
+        NpgsqlConnection connection,
+        string slug,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT id FROM endpoints WHERE slug = @slug LIMIT 1", connection);
+        command.Parameters.AddWithValue("slug", slug);
+
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return result is Guid id ? id : null;
+    }
+
+    private static async Task<string> ReadBodyAsync(HttpRequest request, CancellationToken cancellationToken)
+    {
+        using var buffer = new MemoryStream();
+        await request.Body.CopyToAsync(buffer, cancellationToken);
+        return Encoding.UTF8.GetString(buffer.ToArray());
+    }
+
+    private static bool IsValidJson(string bodyText)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(bodyText);
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+}

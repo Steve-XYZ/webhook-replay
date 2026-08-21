@@ -8,7 +8,7 @@ Orden de entrega. Cada slice es un incremento funcional completo (ruta HTTP + pe
 - [x] Git inicializado, commit `chore: bootstrap webhook replay`
 - [x] Specs escritos
 
-## Slice 1 — ReceiveWebhook
+## Slice 1 — ReceiveWebhook ✅
 
 **Ruta:** `POST /hooks/{slug}`
 

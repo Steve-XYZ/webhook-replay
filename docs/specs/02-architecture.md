@@ -45,6 +45,7 @@ Una sola API por ahora. Las slices viven en carpetas autocontenidas (handler, re
 - **Replay síncrono en el MVP.** Sin workers ni colas. Los retries con backoff llegan después.
 - **Puerto HTTP fijo en 5000** (`launchSettings` trae 5112 por defecto): los ejemplos y tests apuntan a `http://localhost:5000`.
 - **OpenTelemetry desde el inicio pero mínimo:** traces con un span por receive y uno por delivery attempt. Sin dashboards todavía.
+- **Acceso a datos: SQL plano + Npgsql** (decidido al construir la slice 1). El DDL vive como scripts `.sql` versionados en `WebhookReplay.Api/Infrastructure/Migrations/`, embebidos como recursos y aplicados al arrancar dentro de una transacción, con registro en `schema_migrations`. Sin EF Core ni capas de mapeo: son 3 tablas jsonb y el control explícito del SQL pesa más que la conveniencia. Si las queries crecen, se evalúa Dapper (thin), no un ORM.
 
 ## Docker Compose (fase inicial)
 
@@ -53,4 +54,4 @@ Una sola API por ahora. Las slices viven en carpetas autocontenidas (handler, re
 # la API espera a Postgres antes de aplicar migraciones
 ```
 
-Migraciones con EF Core o scripts SQL planos — decidir al construir la primera slice que toca BD.
+Migraciones: scripts SQL versionados aplicados al arrancar (ver decisión más abajo).

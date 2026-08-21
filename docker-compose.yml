@@ -1,0 +1,20 @@
+services:
+  db:
+    image: postgres:17
+    container_name: webhook-replay-db
+    environment:
+      POSTGRES_DB: webhookreplay
+      POSTGRES_USER: webhookreplay
+      POSTGRES_PASSWORD: webhookreplay
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U webhookreplay -d webhookreplay"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  db-data:
