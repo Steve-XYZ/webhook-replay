@@ -28,7 +28,7 @@ Persiste method, headers y body en `webhook_requests`, resolviendo el endpoint p
 
 **Setup requerido:** puerto HTTP fijo en 5000; Postgres vía Docker Compose; migraciones aplicadas al arrancar.
 
-## Slice 2 — CreateEndpoint
+## Slice 2 — CreateEndpoint ✅
 
 **Ruta:** `POST /api/endpoints` `{ name, slug, forwardUrl }`
 
@@ -38,13 +38,13 @@ Persiste method, headers y body en `webhook_requests`, resolviendo el endpoint p
 3. Validación: slug no vacío (patrón `[a-z0-9-]+`), `forwardUrl` debe ser URL absoluta http(s).
 4. Con esta slice, el flujo end-to-end ya no depende de SQL manual: se crea el endpoint `test` vía API y se le dispara el curl de la slice 1.
 
-## Slice 3 — GetEndpoint
+## Slice 3 — GetEndpoint ✅
 
 **Ruta:** `GET /api/endpoints/{id}`
 
 **Criterios de aceptación:** `200` con datos del endpoint; id inexistente → `404`.
 
-## Slice 4 — ListWebhooks
+## Slice 4 — ListWebhooks ✅
 
 **Ruta:** `GET /api/endpoints/{endpointId}/webhooks?limit=&before=`
 
@@ -55,7 +55,7 @@ Lista paginada simple (más reciente primero) para la UI.
 2. Default `limit=50`, máximo 100.
 3. Orden estable por `received_at DESC`.
 
-## Slice 5 — GetWebhook
+## Slice 5 — GetWebhook ✅
 
 **Ruta:** `GET /api/webhooks/{id}`
 
@@ -63,7 +63,7 @@ Detalle completo: headers, body crudo, parsed JSON si aplica, timestamp, y deliv
 
 **Criterios de aceptación:** headers/body exactamente como fueron recibidos (byte-fiel); incluye attempts ordenados por `attempted_at DESC`.
 
-## Slice 6 — ReplayWebhook
+## Slice 6 — ReplayWebhook ✅
 
 **Ruta:** `POST /api/webhooks/{id}/replay`
 
@@ -75,7 +75,7 @@ Reenvía el request guardado al `ForwardUrl` del endpoint y registra el `Deliver
 3. Timeout del destino → attempt queda con `status_code = NULL` y la API responde `502` con el attempt serializado.
 4. Re-ejecutable N veces; cada intento crea una fila nueva.
 
-## Slice 7 — GetDeliveryAttempts
+## Slice 7 — GetDeliveryAttempts ✅
 
 **Ruta:** `GET /api/webhooks/{id}/attempts`
 
