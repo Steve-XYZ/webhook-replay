@@ -6,7 +6,7 @@ namespace WebhookReplay.Api.Features.Endpoints;
 
 public static class CreateEndpoint
 {
-    private const string SlugPattern = "^[a-z0-9-]+$";
+    private const string SlugPattern = "\\A[a-z0-9-]+\\z";
 
     private const string InsertSql = """
         INSERT INTO endpoints (id, name, slug, forward_url, created_at)
@@ -20,14 +20,14 @@ public static class CreateEndpoint
         NpgsqlDataSource dataSource,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(request.Name) || request.Name.Any(char.IsWhiteSpace))
+        if (string.IsNullOrWhiteSpace(request.Name))
         {
-            return Results.BadRequest(new { error = "Name must be non-empty and contain no whitespace." });
+            return Results.BadRequest(new { error = "Name must be non-empty." });
         }
 
         if (!Regex.IsMatch(request.Slug, SlugPattern))
         {
-            return Results.BadRequest(new { error = "Slug must match '^[a-z0-9-]+$'." });
+            return Results.BadRequest(new { error = "Slug must match '[a-z0-9-]+'." });
         }
 
         if (!Uri.TryCreate(request.ForwardUrl, UriKind.Absolute, out var forwardUri) ||

@@ -26,7 +26,6 @@ public static class ReplayWebhook
 
     public static async Task<IResult> HandleAsync(
         string id,
-        HttpRequest originalRequest,
         NpgsqlDataSource dataSource,
         IHttpClientFactory httpClientFactory,
         CancellationToken cancellationToken)
@@ -65,7 +64,7 @@ public static class ReplayWebhook
             var attemptedAt = DateTime.UtcNow;
             await InsertAttemptAsync(
                 connection, attemptId, requestId, stored.ForwardUrl, statusCode, responseBody,
-                stopwatch.ElapsedMilliseconds, attemptedAt, cancellationToken);
+                stopwatch.ElapsedMilliseconds, attemptedAt, CancellationToken.None);
 
             return Results.Ok(new
             {
@@ -82,7 +81,7 @@ public static class ReplayWebhook
         {
             stopwatch.Stop();
             return await RecordFailedAttemptAsync(
-                connection, requestId, stored.ForwardUrl, stopwatch.ElapsedMilliseconds, cancellationToken);
+                connection, requestId, stored.ForwardUrl, stopwatch.ElapsedMilliseconds);
         }
         finally
         {
@@ -166,19 +165,18 @@ public static class ReplayWebhook
         NpgsqlConnection connection,
         Guid requestId,
         string targetUrl,
-        long durationMs,
-        CancellationToken cancellationToken)
+        long durationMs)
     {
         var attemptId = Guid.CreateVersion7();
         var attemptedAt = DateTime.UtcNow;
         await InsertAttemptAsync(connection, attemptId, requestId, targetUrl, null, null,
-            durationMs, attemptedAt, cancellationToken);
+            durationMs, attemptedAt, CancellationToken.None);
 
         return Results.Json(new
         {
             id = attemptId,
             targetUrl,
-            statusCode = (string?)null,
+            statusCode = (int?)null,
             responseBody = (string?)null,
             durationMs = (int)durationMs,
             attemptedAt
