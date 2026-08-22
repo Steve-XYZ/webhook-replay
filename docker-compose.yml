@@ -24,6 +24,8 @@ services:
       ConnectionStrings__Default: Host=db;Port=5432;Database=webhookreplay;Username=webhookreplay;Password=webhookreplay
     ports:
       - "5000:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy
@@ -36,6 +38,8 @@ services:
     container_name: webhook-replay-ui
     environment:
       API_BASE: http://api:8080
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "3000:3000"
     depends_on:
