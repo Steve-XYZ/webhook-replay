@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
 
@@ -27,6 +28,21 @@ public static class IngestRateLimiting
                         Window = TimeSpan.FromSeconds(windowSeconds),
                         QueueLimit = 0,
                     }));
+
+            options.OnRejected = (context, _) =>
+            {
+                context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+
+                if (!context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+                {
+                    retryAfter = TimeSpan.FromSeconds(windowSeconds);
+                }
+
+                context.HttpContext.Response.Headers.RetryAfter =
+                    ((int)retryAfter.TotalSeconds).ToString(NumberFormatInfo.InvariantInfo);
+
+                return ValueTask.CompletedTask;
+            };
         });
 
         return services;
