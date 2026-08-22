@@ -185,6 +185,20 @@ public sealed class WebhookReplayApiTests
                     if (probe.RootElement.GetProperty("bodyPreview").GetString()!.Contains("orderId"))
                     {
                         dataLine = candidate;
+
+                        using var grace = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                        try
+                        {
+                            var terminator = await reader.ReadLineAsync(grace.Token);
+                            if (terminator is not null)
+                            {
+                                rawLines.Add(terminator);
+                            }
+                        }
+                        catch (OperationCanceledException)
+                        {
+                        }
+                        break;
                     }
                 }
             }
@@ -197,6 +211,7 @@ public sealed class WebhookReplayApiTests
         Assert.True(
             dataLine is not null,
             $"""no webhook event received. Raw stream ({rawLines.Count} lines):{rawDump}""");
+        Assert.Equal("", rawLines[^1]);
         using var payload = JsonDocument.Parse(dataLine!);
         Assert.Equal("POST", payload.RootElement.GetProperty("method").GetString());
         Assert.True(Guid.TryParse(payload.RootElement.GetProperty("id").GetString(), out _));
