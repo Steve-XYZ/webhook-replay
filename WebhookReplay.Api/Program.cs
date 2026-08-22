@@ -55,3 +55,5 @@ app.MapPost("/api/webhooks/{id}/replay", ReplayWebhook.HandleAsync);
 app.MapGet("/api/webhooks/{id}/attempts", GetDeliveryAttempts.HandleAsync);
 
 app.Run();
+
+public partial class Program { }
