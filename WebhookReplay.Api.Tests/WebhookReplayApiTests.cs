@@ -1,9 +1,12 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
 using Xunit;
 
 namespace WebhookReplay.Api.Tests;
@@ -531,6 +534,196 @@ public sealed class WebhookReplayApiTests
     }
 
 
+    [Fact]
+    public async Task Replay_with_MaxAttempts_three_retries_on_500_and_final_response_reflects_last_attempt()
+    {
+        await using var retryFactory = new RetryingApiFactory(_fixture.ConnectionString, maxAttempts: 3, backoffBaseSeconds: 1);
+        var client = retryFactory.CreateClient();
+
+        var (port, listener) = StartStubListener();
+        try
+        {
+            var requestsServed = RespondWithStatuses(listener, 500);
+
+            var slug = NewSlug();
+            await _fixture.SeedEndpointAsync(slug, $"http://127.0.0.1:{port}/target");
+
+            using var post = new StringContent("""{"orderId":456}""", Encoding.UTF8, "application/json");
+            using var ingest = await client.PostAsync($"/hooks/{slug}", post);
+            Assert.Equal(HttpStatusCode.NoContent, ingest.StatusCode);
+
+            var webhookId = await GetSingleWebhookIdAsync(client, slug);
+
+            var stopwatch = Stopwatch.StartNew();
+            using var replay = await client.PostAsync($"/api/webhooks/{webhookId}/replay", null);
+            stopwatch.Stop();
+            Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
+
+            using var replayDocument = JsonDocument.Parse(await replay.Content.ReadAsStringAsync());
+            Assert.Equal(500, replayDocument.RootElement.GetProperty("statusCode").GetInt32());
+
+            Assert.Equal(3, requestsServed());
+
+            using var attempts = await client.GetAsync($"/api/webhooks/{webhookId}/attempts");
+            attempts.EnsureSuccessStatusCode();
+
+            using var attemptsDocument = JsonDocument.Parse(await attempts.Content.ReadAsStringAsync());
+            var attemptItems = attemptsDocument.RootElement.GetProperty("items");
+            Assert.Equal(3, attemptItems.GetArrayLength());
+            foreach (var attempt in attemptItems.EnumerateArray())
+            {
+                Assert.Equal(500, attempt.GetProperty("statusCode").GetInt32());
+            }
+
+            Assert.True(stopwatch.Elapsed.TotalSeconds >= 2.5);
+        }
+        finally
+        {
+            listener.Stop();
+            listener.Close();
+        }
+    }
+
+    [Fact]
+    public async Task Replay_stops_retrying_after_first_success_response()
+    {
+        await using var retryFactory = new RetryingApiFactory(_fixture.ConnectionString, maxAttempts: 5, backoffBaseSeconds: 0);
+        var client = retryFactory.CreateClient();
+
+        var (port, listener) = StartStubListener();
+        try
+        {
+            var requestsServed = RespondWithStatuses(listener, 500, 204);
+
+            var slug = NewSlug();
+            await _fixture.SeedEndpointAsync(slug, $"http://127.0.0.1:{port}/target");
+
+            using var post = new StringContent("""{"orderId":456}""", Encoding.UTF8, "application/json");
+            using var ingest = await client.PostAsync($"/hooks/{slug}", post);
+            Assert.Equal(HttpStatusCode.NoContent, ingest.StatusCode);
+
+            var webhookId = await GetSingleWebhookIdAsync(client, slug);
+
+            using var replay = await client.PostAsync($"/api/webhooks/{webhookId}/replay", null);
+            Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
+
+            using var replayDocument = JsonDocument.Parse(await replay.Content.ReadAsStringAsync());
+            Assert.Equal(204, replayDocument.RootElement.GetProperty("statusCode").GetInt32());
+
+            await Task.Delay(200);
+            Assert.Equal(2, requestsServed());
+
+            using var attempts = await client.GetAsync($"/api/webhooks/{webhookId}/attempts");
+            attempts.EnsureSuccessStatusCode();
+
+            using var attemptsDocument = JsonDocument.Parse(await attempts.Content.ReadAsStringAsync());
+            var attemptItems = attemptsDocument.RootElement.GetProperty("items");
+            Assert.Equal(2, attemptItems.GetArrayLength());
+            Assert.Equal(1, attemptItems.EnumerateArray().Count(a => a.GetProperty("statusCode").GetInt32() == 500));
+            Assert.Equal(1, attemptItems.EnumerateArray().Count(a => a.GetProperty("statusCode").GetInt32() == 204));
+        }
+        finally
+        {
+            listener.Stop();
+            listener.Close();
+        }
+    }
+
+    [Fact]
+    public async Task Replay_with_default_config_makes_single_attempt_even_on_500()
+    {
+        var client = _fixture.CreateClient();
+
+        var (port, listener) = StartStubListener();
+        try
+        {
+            var requestsServed = RespondWithStatuses(listener, 500);
+
+            var slug = NewSlug();
+            await _fixture.SeedEndpointAsync(slug, $"http://127.0.0.1:{port}/target");
+
+            using var post = new StringContent("""{"orderId":456}""", Encoding.UTF8, "application/json");
+            using var ingest = await client.PostAsync($"/hooks/{slug}", post);
+            Assert.Equal(HttpStatusCode.NoContent, ingest.StatusCode);
+
+            var webhookId = await GetSingleWebhookIdAsync(client, slug);
+
+            using var replay = await client.PostAsync($"/api/webhooks/{webhookId}/replay", null);
+            Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
+
+            using var replayDocument = JsonDocument.Parse(await replay.Content.ReadAsStringAsync());
+            Assert.Equal(500, replayDocument.RootElement.GetProperty("statusCode").GetInt32());
+
+            Assert.Equal(1, requestsServed());
+
+            using var attempts = await client.GetAsync($"/api/webhooks/{webhookId}/attempts");
+            attempts.EnsureSuccessStatusCode();
+
+            using var attemptsDocument = JsonDocument.Parse(await attempts.Content.ReadAsStringAsync());
+            var attemptItems = attemptsDocument.RootElement.GetProperty("items");
+            Assert.Equal(1, attemptItems.GetArrayLength());
+            Assert.Equal(500, attemptItems[0].GetProperty("statusCode").GetInt32());
+        }
+        finally
+        {
+            listener.Stop();
+            listener.Close();
+        }
+    }
+
+    [Fact]
+    public async Task Replay_returns_502_and_records_every_transport_failure_when_retries_enabled()
+    {
+        await using var retryFactory = new RetryingApiFactory(_fixture.ConnectionString, maxAttempts: 3, backoffBaseSeconds: 0);
+        var client = retryFactory.CreateClient();
+
+        var slug = NewSlug();
+        await _fixture.SeedEndpointAsync(slug, "http://127.0.0.1:59999/x");
+
+        using var post = new StringContent("""{"orderId":789}""", Encoding.UTF8, "application/json");
+        using var ingest = await client.PostAsync($"/hooks/{slug}", post);
+        Assert.Equal(HttpStatusCode.NoContent, ingest.StatusCode);
+
+        var webhookId = await GetSingleWebhookIdAsync(client, slug);
+
+        using var replay = await client.PostAsync($"/api/webhooks/{webhookId}/replay", null);
+        Assert.Equal(HttpStatusCode.BadGateway, replay.StatusCode);
+
+        using var replayDocument = JsonDocument.Parse(await replay.Content.ReadAsStringAsync());
+        Assert.Equal(JsonValueKind.Null, replayDocument.RootElement.GetProperty("statusCode").ValueKind);
+
+        using var attempts = await client.GetAsync($"/api/webhooks/{webhookId}/attempts");
+        attempts.EnsureSuccessStatusCode();
+
+        using var attemptsDocument = JsonDocument.Parse(await attempts.Content.ReadAsStringAsync());
+        var attemptItems = attemptsDocument.RootElement.GetProperty("items");
+        Assert.Equal(3, attemptItems.GetArrayLength());
+        foreach (var attempt in attemptItems.EnumerateArray())
+        {
+            Assert.Equal(JsonValueKind.Null, attempt.GetProperty("statusCode").ValueKind);
+        }
+    }
+
+    private async Task<Guid> GetSingleWebhookIdAsync(HttpClient client, string slug)
+    {
+        var endpoints = await client.GetAsync("/api/endpoints");
+        endpoints.EnsureSuccessStatusCode();
+
+        using var endpointsDocument = JsonDocument.Parse(await endpoints.Content.ReadAsStringAsync());
+        var endpointId = endpointsDocument.RootElement.GetProperty("items")
+            .EnumerateArray()
+            .First(item => item.GetProperty("slug").GetString() == slug)
+            .GetProperty("id")
+            .GetString();
+
+        var webhooks = await client.GetAsync($"/api/endpoints/{endpointId}/webhooks");
+        webhooks.EnsureSuccessStatusCode();
+
+        using var webhooksDocument = JsonDocument.Parse(await webhooks.Content.ReadAsStringAsync());
+        return Guid.Parse(webhooksDocument.RootElement.GetProperty("items")[0].GetProperty("id").GetString()!);
+    }
+
+
     private static string NewSlug() => $"it-{Guid.NewGuid():N}";
 
     private static string NewSlug(string prefix) => $"{prefix}-{Guid.NewGuid():N}";
@@ -561,25 +754,6 @@ public sealed class WebhookReplayApiTests
 
         using var document = JsonDocument.Parse(await webhooks.Content.ReadAsStringAsync());
         return document.RootElement.GetProperty("items").GetArrayLength();
-    }
-
-    private async Task<Guid> GetSingleWebhookIdAsync(HttpClient client, string slug)
-    {
-        var endpoints = await client.GetAsync("/api/endpoints");
-        endpoints.EnsureSuccessStatusCode();
-
-        using var endpointsDocument = JsonDocument.Parse(await endpoints.Content.ReadAsStringAsync());
-        var endpointId = endpointsDocument.RootElement.GetProperty("items")
-            .EnumerateArray()
-            .First(item => item.GetProperty("slug").GetString() == slug)
-            .GetProperty("id")
-            .GetString();
-
-        var webhooks = await client.GetAsync($"/api/endpoints/{endpointId}/webhooks");
-        webhooks.EnsureSuccessStatusCode();
-
-        using var webhooksDocument = JsonDocument.Parse(await webhooks.Content.ReadAsStringAsync());
-        return Guid.Parse(webhooksDocument.RootElement.GetProperty("items")[0].GetProperty("id").GetString()!);
     }
 
     private static int FindFreePort()
@@ -631,6 +805,43 @@ public sealed class WebhookReplayApiTests
             context.Response.Close();
         });
         return captured;
+    }
+
+    private static Func<int> RespondWithStatuses(HttpListener listener, params int[] statusCodes)
+    {
+        var requestsServed = 0;
+        _ = Task.Run(async () =>
+        {
+            while (listener.IsListening)
+            {
+                HttpListenerContext context;
+                try
+                {
+                    context = await listener.GetContextAsync();
+                }
+                catch (Exception)
+                {
+                    return;
+                }
+
+                var statusCodeIndex = Math.Min(requestsServed, statusCodes.Length - 1);
+                requestsServed++;
+                context.Response.StatusCode = statusCodes[statusCodeIndex];
+                context.Response.Close();
+            }
+        });
+        return () => requestsServed;
+    }
+
+    private sealed class RetryingApiFactory(string connectionString, int maxAttempts, int backoffBaseSeconds)
+        : WebApplicationFactory<Program>
+    {
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            builder.UseSetting("ConnectionStrings:Default", connectionString);
+            builder.UseSetting("Retry:MaxAttempts", maxAttempts.ToString());
+            builder.UseSetting("Retry:BackoffBaseSeconds", backoffBaseSeconds.ToString());
+        }
     }
 
 }
