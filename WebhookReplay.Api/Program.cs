@@ -18,6 +18,7 @@ builder.WebHost.ConfigureKestrel(options =>
 
 builder.Services.AddOpenApi();
 
+builder.Services.AddIngestRateLimiting(builder.Configuration);
 builder.Services.AddWebhookHealthChecks();
 
 builder.Services.AddHttpClient();
@@ -50,7 +51,9 @@ if (app.Environment.IsDevelopment())
 
 await DbMigrations.ApplyAsync(app.Services.GetRequiredService<NpgsqlDataSource>(), app.Logger);
 
-app.MapPost("/hooks/{slug}", ReceiveWebhook.HandleAsync);
+app.UseRateLimiter();
+
+app.MapPost("/hooks/{slug}", ReceiveWebhook.HandleAsync).RequireRateLimiting("ingest");
 app.MapPost("/api/endpoints", CreateEndpoint.HandleAsync);
 app.MapGet("/api/endpoints", ListEndpoints.HandleAsync);
 app.MapGet("/api/endpoints/{id}", GetEndpoint.HandleAsync);
