@@ -140,6 +140,7 @@ export interface paths {
                 query?: {
                     limit?: number | string;
                     before?: string;
+                    q?: string;
                 };
                 header?: never;
                 path: {

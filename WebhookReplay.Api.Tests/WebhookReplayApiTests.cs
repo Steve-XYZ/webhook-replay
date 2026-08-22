@@ -132,6 +132,98 @@ public sealed class WebhookReplayApiTests
         Assert.Equal(JsonValueKind.Null, attemptItems[0].GetProperty("statusCode").ValueKind);
     }
 
+    [Fact]
+    public async Task ListWebhooks_q_filters_to_matching_body()
+    {
+        var slug = NewSlug();
+        var endpointId = await _fixture.SeedEndpointAsync(slug, "http://127.0.0.1:1/unused");
+        var matchId = await _fixture.SeedWebhookAsync(endpointId, """{"event":"invoice.paid","amount":42}""", T(1));
+        await _fixture.SeedWebhookAsync(endpointId, """{"event":"invoice.void","amount":43}""", T(2));
+
+        using var list = await _fixture.CreateClient()
+            .GetAsync($"/api/endpoints/{endpointId}/webhooks?q=invoice.paid");
+        Assert.Equal(HttpStatusCode.OK, list.StatusCode);
+
+        using var document = JsonDocument.Parse(await list.Content.ReadAsStringAsync());
+        var items = document.RootElement.GetProperty("items");
+        Assert.Equal(1, items.GetArrayLength());
+        Assert.Equal(matchId, Guid.Parse(items[0].GetProperty("id").GetString()!));
+    }
+
+    [Fact]
+    public async Task ListWebhooks_q_combines_with_before_cursor()
+    {
+        var slug = NewSlug();
+        var endpointId = await _fixture.SeedEndpointAsync(slug, "http://127.0.0.1:1/unused");
+        var oldMatchId = await _fixture.SeedWebhookAsync(endpointId, "needle in the old payload", T(10));
+        var middleNoiseId = await _fixture.SeedWebhookAsync(endpointId, "nothing to see here", T(20));
+        var newMatchId = await _fixture.SeedWebhookAsync(endpointId, "needle in the new payload", T(30));
+
+        var client = _fixture.CreateClient();
+
+        using var filtered = await client.GetAsync($"/api/endpoints/{endpointId}/webhooks?q=needle");
+        Assert.Equal(HttpStatusCode.OK, filtered.StatusCode);
+        using var filteredDocument = JsonDocument.Parse(await filtered.Content.ReadAsStringAsync());
+        var filteredIds = ToIds(filteredDocument.RootElement.GetProperty("items"));
+        Assert.Equal([newMatchId, oldMatchId], filteredIds);
+
+        var cursor = Uri.EscapeDataString($"{T(30):O}");
+
+        using var filteredOlder = await client
+            .GetAsync($"/api/endpoints/{endpointId}/webhooks?q=needle&before={cursor}");
+        Assert.Equal(HttpStatusCode.OK, filteredOlder.StatusCode);
+        using var filteredOlderDocument = JsonDocument.Parse(await filteredOlder.Content.ReadAsStringAsync());
+        Assert.Equal([oldMatchId], ToIds(filteredOlderDocument.RootElement.GetProperty("items")));
+
+        using var unfilteredOlder = await client
+            .GetAsync($"/api/endpoints/{endpointId}/webhooks?before={cursor}");
+        Assert.Equal(HttpStatusCode.OK, unfilteredOlder.StatusCode);
+        using var unfilteredOlderDocument = JsonDocument.Parse(await unfilteredOlder.Content.ReadAsStringAsync());
+        Assert.Equal([middleNoiseId, oldMatchId], ToIds(unfilteredOlderDocument.RootElement.GetProperty("items")));
+    }
+
+    [Fact]
+    public async Task ListWebhooks_q_escapes_like_wildcards()
+    {
+        var slug = NewSlug();
+        var endpointId = await _fixture.SeedEndpointAsync(slug, "http://127.0.0.1:1/unused");
+        var percentId = await _fixture.SeedWebhookAsync(endpointId, "alpha 100% done", T(1));
+        await _fixture.SeedWebhookAsync(endpointId, "alpha 100x done", T(2));
+        var underscoreId = await _fixture.SeedWebhookAsync(endpointId, "beta a_b token", T(3));
+        await _fixture.SeedWebhookAsync(endpointId, "beta axb token", T(4));
+        var backslashId = await _fixture.SeedWebhookAsync(endpointId, @"gamma C:\bin path", T(5));
+        await _fixture.SeedWebhookAsync(endpointId, "gamma C:bin path", T(6));
+
+        var client = _fixture.CreateClient();
+
+        using var percentSearch = await client
+            .GetAsync($"/api/endpoints/{endpointId}/webhooks?q={Uri.EscapeDataString("100%")}");
+        Assert.Equal(HttpStatusCode.OK, percentSearch.StatusCode);
+        using var percentDocument = JsonDocument.Parse(await percentSearch.Content.ReadAsStringAsync());
+        Assert.Equal([percentId], ToIds(percentDocument.RootElement.GetProperty("items")));
+
+        using var underscoreSearch = await client
+            .GetAsync($"/api/endpoints/{endpointId}/webhooks?q={Uri.EscapeDataString("a_b")}");
+        Assert.Equal(HttpStatusCode.OK, underscoreSearch.StatusCode);
+        using var underscoreDocument = JsonDocument.Parse(await underscoreSearch.Content.ReadAsStringAsync());
+        Assert.Equal([underscoreId], ToIds(underscoreDocument.RootElement.GetProperty("items")));
+
+        using var backslashSearch = await client
+            .GetAsync($"/api/endpoints/{endpointId}/webhooks?q={Uri.EscapeDataString(@"C:\bin")}");
+        Assert.Equal(HttpStatusCode.OK, backslashSearch.StatusCode);
+        using var backslashDocument = JsonDocument.Parse(await backslashSearch.Content.ReadAsStringAsync());
+        Assert.Equal([backslashId], ToIds(backslashDocument.RootElement.GetProperty("items")));
+    }
+
+    private static readonly DateTime SeedBase = new(2026, 8, 22, 12, 0, 0, DateTimeKind.Utc);
+
+    private static DateTime T(int minutes) => SeedBase.AddMinutes(minutes);
+
+    private static IReadOnlyList<Guid> ToIds(JsonElement items) =>
+        items.EnumerateArray()
+            .Select(item => Guid.Parse(item.GetProperty("id").GetString()!))
+            .ToArray();
+
     private static string NewSlug() => $"it-{Guid.NewGuid():N}";
 
     private async Task<Guid> GetSingleWebhookIdAsync(HttpClient client, string slug)
