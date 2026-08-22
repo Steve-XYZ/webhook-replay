@@ -155,15 +155,30 @@ public sealed class WebhookReplayApiTests
 
     private static (int Port, HttpListener Listener) StartStubListener()
     {
+        for (var attempt = 0; ; attempt++)
+        {
+            var port = FindFreePort();
+            var listener = new HttpListener();
+            listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+            try
+            {
+                listener.Start();
+                return (port, listener);
+            }
+            catch (HttpListenerException) when (attempt < 2)
+            {
+                listener.Close();
+            }
+        }
+    }
+
+    private static int FindFreePort()
+    {
         using var probe = new TcpListener(IPAddress.Loopback, 0);
         probe.Start();
         var port = ((IPEndPoint)probe.LocalEndpoint).Port;
         probe.Stop();
-
-        var listener = new HttpListener();
-        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
-        listener.Start();
-        return (port, listener);
+        return port;
     }
 
     private static Task RespondWithNoContentOnce(HttpListener listener) => Task.Run(async () =>

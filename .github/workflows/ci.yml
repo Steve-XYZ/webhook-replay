@@ -6,6 +6,10 @@ on:
     branches:
       - main
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   api:
     runs-on: ubuntu-latest
@@ -15,7 +19,7 @@ jobs:
         with:
           dotnet-version: 10.0.x
       - run: dotnet build
-      - run: dotnet test
+      - run: dotnet test --no-build
 
   ui:
     runs-on: ubuntu-latest
