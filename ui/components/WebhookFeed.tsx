@@ -20,6 +20,7 @@ export default function WebhookFeed({ endpointId, initialPage }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
+  const [live, setLive] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
@@ -60,6 +61,29 @@ export default function WebhookFeed({ endpointId, initialPage }: Props) {
       fetchFirstPage(trimmed);
     }, 300);
   }
+
+  useEffect(() => {
+    const source = new EventSource(`/api/endpoints/${endpointId}/events`);
+
+    source.addEventListener("open", () => setLive(true));
+    source.addEventListener("error", () => setLive(false));
+    source.addEventListener("webhook", (event) => {
+      try {
+        const item = JSON.parse(
+          (event as MessageEvent<string>).data,
+        ) as WebhookSummary;
+        setItems((prev) =>
+          prev.some((existing) => existing.id === item.id) || activeQuery !== ""
+            ? prev
+            : [item, ...prev],
+        );
+      } catch {
+        return;
+      }
+    });
+
+    return () => source.close();
+  }, [endpointId, activeQuery]);
 
   async function refresh() {
     setRefreshing(true);
@@ -108,6 +132,11 @@ export default function WebhookFeed({ endpointId, initialPage }: Props) {
         <h2>
           Requests ({items.length})
           {activeQuery !== "" && " matching search"}
+          <span
+            className={`live-dot ${live ? "on" : ""}`}
+            title={live ? "Live updates connected" : "Live feed connecting…"}
+            aria-label={live ? "Live" : "Connecting"}
+          />
         </h2>
         <button
           type="button"
