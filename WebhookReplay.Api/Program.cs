@@ -19,6 +19,8 @@ builder.Services.AddOpenApi();
 
 builder.Services.AddHttpClient();
 
+builder.Services.AddWebhookRetention(builder.Configuration);
+
 builder.Services.AddSingleton<NpgsqlDataSource>(sp =>
 {
     var configuration = sp.GetRequiredService<IConfiguration>();
