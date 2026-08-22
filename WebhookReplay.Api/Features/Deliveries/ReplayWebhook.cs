@@ -20,12 +20,13 @@ public static class ReplayWebhook
         """;
 
     private const string InsertSql = """
-        INSERT INTO delivery_attempts (id, webhook_request_id, target_url, status_code, response_body, duration_ms, attempted_at)
-        VALUES (@id, @webhook_request_id, @target_url, @status_code, @response_body, @duration_ms, @attempted_at)
+        INSERT INTO delivery_attempts (id, webhook_request_id, target_url, status_code, response_body, duration_ms, attempted_at, request_headers, request_body)
+        VALUES (@id, @webhook_request_id, @target_url, @status_code, @response_body, @duration_ms, @attempted_at, @request_headers, @request_body)
         """;
 
     public static async Task<IResult> HandleAsync(
         string id,
+        HttpRequest request,
         NpgsqlDataSource dataSource,
         IHttpClientFactory httpClientFactory,
         CancellationToken cancellationToken)
@@ -33,6 +34,12 @@ public static class ReplayWebhook
         if (!Guid.TryParse(id, out var requestId))
         {
             return Results.NotFound(new { error = $"Webhook '{id}' not found." });
+        }
+
+        var overrides = await ParseOverridesAsync(request, cancellationToken);
+        if (overrides.Error is not null)
+        {
+            return Results.BadRequest(new { error = overrides.Error });
         }
 
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
@@ -43,11 +50,92 @@ public static class ReplayWebhook
             return Results.NotFound(new { error = $"Webhook '{id}' not found." });
         }
 
-        using var requestMessage = BuildOutgoingRequest(stored);
+        var payload = ResolveEffectivePayload(stored, overrides.Value);
+        if (!Uri.TryCreate(payload.TargetUrl, UriKind.Absolute, out var targetUri) ||
+            (targetUri.Scheme != Uri.UriSchemeHttp && targetUri.Scheme != Uri.UriSchemeHttps))
+        {
+            return Results.BadRequest(new { error = "Target URL must be an absolute http(s) URL." });
+        }
+
+        return await SendAndRecordAsync(connection, requestId, payload, httpClientFactory, cancellationToken);
+    }
+
+    internal sealed record EffectivePayload(string Method, string TargetUrl, JsonElement Headers, string BodyText);
+
+    private sealed record StoredRequest(string Method, JsonElement Headers, string BodyText, string ForwardUrl);
+
+    private sealed record ReplayOverrides(string? TargetUrl, Dictionary<string, string[]>? Headers, string? Body);
+
+    private readonly record struct OverridesParse(ReplayOverrides? Value, string? Error);
+
+    private static async Task<OverridesParse> ParseOverridesAsync(HttpRequest request, CancellationToken cancellationToken)
+    {
+        using var buffer = new MemoryStream();
+        await request.Body.CopyToAsync(buffer, cancellationToken);
+        if (buffer.Length == 0)
+        {
+            return new OverridesParse(null, null);
+        }
+
+        ReplayOverrides? overrides;
+        try
+        {
+            overrides = JsonSerializer.Deserialize<ReplayOverrides>(
+                buffer.ToArray(),
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch (JsonException)
+        {
+            return new OverridesParse(null, "Replay overrides must be a valid JSON object.");
+        }
+
+        if (overrides is null)
+        {
+            return new OverridesParse(null, null);
+        }
+
+        if (overrides.Headers is not null &&
+            overrides.Headers.Any(header => header.Value is null))
+        {
+            return new OverridesParse(null, "Header override values must be arrays of strings.");
+        }
+
+        return new OverridesParse(overrides, null);
+    }
+
+    private static EffectivePayload ResolveEffectivePayload(StoredRequest stored, ReplayOverrides? overrides)
+    {
+        if (overrides is null)
+        {
+            return new EffectivePayload(stored.Method, stored.ForwardUrl, stored.Headers, stored.BodyText);
+        }
+
+        var headers = stored.Headers;
+        if (overrides.Headers is not null)
+        {
+            using var document = JsonDocument.Parse(JsonSerializer.Serialize(overrides.Headers));
+            headers = document.RootElement.Clone();
+        }
+
+        return new EffectivePayload(
+            stored.Method,
+            overrides.TargetUrl ?? stored.ForwardUrl,
+            headers,
+            overrides.Body ?? stored.BodyText);
+    }
+
+    private static async Task<IResult> SendAndRecordAsync(
+        NpgsqlConnection connection,
+        Guid requestId,
+        EffectivePayload payload,
+        IHttpClientFactory httpClientFactory,
+        CancellationToken cancellationToken)
+    {
         var stopwatch = Stopwatch.StartNew();
 
         try
         {
+            using var requestMessage = BuildOutgoingRequest(payload);
             var client = httpClientFactory.CreateClient("replay");
             using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeoutSource.CancelAfter(TimeSpan.FromSeconds(30));
@@ -63,29 +151,18 @@ public static class ReplayWebhook
             var attemptId = Guid.CreateVersion7();
             var attemptedAt = DateTime.UtcNow;
             await InsertAttemptAsync(
-                connection, attemptId, requestId, stored.ForwardUrl, statusCode, responseBody,
-                stopwatch.ElapsedMilliseconds, attemptedAt, CancellationToken.None);
+                connection, attemptId, requestId, payload.TargetUrl, statusCode, responseBody,
+                stopwatch.ElapsedMilliseconds, attemptedAt, payload, CancellationToken.None);
 
-            return Results.Ok(new
-            {
-                id = attemptId,
-                targetUrl = stored.ForwardUrl,
-                statusCode,
-                responseBody,
-                durationMs = (int)stopwatch.ElapsedMilliseconds,
-                attemptedAt
-            });
+            return Results.Ok(SerializeAttempt(attemptId, payload, statusCode, responseBody,
+                stopwatch.ElapsedMilliseconds, attemptedAt));
         }
         catch (Exception ex) when ((ex is OperationCanceledException or HttpRequestException)
                                    && !cancellationToken.IsCancellationRequested)
         {
             stopwatch.Stop();
             return await RecordFailedAttemptAsync(
-                connection, requestId, stored.ForwardUrl, stopwatch.ElapsedMilliseconds);
-        }
-        finally
-        {
-            stopwatch.Stop();
+                connection, requestId, payload, stopwatch.ElapsedMilliseconds);
         }
     }
 
@@ -110,14 +187,14 @@ public static class ReplayWebhook
             reader.GetString(3));
     }
 
-    private static HttpRequestMessage BuildOutgoingRequest(StoredRequest stored)
+    private static HttpRequestMessage BuildOutgoingRequest(EffectivePayload payload)
     {
-        var requestMessage = new HttpRequestMessage(new HttpMethod(stored.Method), new Uri(stored.ForwardUrl))
+        var requestMessage = new HttpRequestMessage(new HttpMethod(payload.Method), new Uri(payload.TargetUrl))
         {
-            Content = new ByteArrayContent(Encoding.UTF8.GetBytes(stored.BodyText))
+            Content = new ByteArrayContent(Encoding.UTF8.GetBytes(payload.BodyText))
         };
 
-        foreach (var header in stored.Headers.EnumerateObject())
+        foreach (var header in payload.Headers.EnumerateObject())
         {
             if (header.Name.Equals("Host", StringComparison.OrdinalIgnoreCase) ||
                 header.Name.Equals("Content-Length", StringComparison.OrdinalIgnoreCase))
@@ -164,23 +241,38 @@ public static class ReplayWebhook
     private static async Task<IResult> RecordFailedAttemptAsync(
         NpgsqlConnection connection,
         Guid requestId,
-        string targetUrl,
+        EffectivePayload payload,
         long durationMs)
     {
         var attemptId = Guid.CreateVersion7();
         var attemptedAt = DateTime.UtcNow;
-        await InsertAttemptAsync(connection, attemptId, requestId, targetUrl, null, null,
-            durationMs, attemptedAt, CancellationToken.None);
+        await InsertAttemptAsync(connection, attemptId, requestId, payload.TargetUrl, null, null,
+            durationMs, attemptedAt, payload, CancellationToken.None);
 
-        return Results.Json(new
+        return Results.Json(
+            SerializeAttempt(attemptId, payload, null, null, durationMs, attemptedAt),
+            statusCode: 502);
+    }
+
+    private static object SerializeAttempt(
+        Guid attemptId,
+        EffectivePayload payload,
+        int? statusCode,
+        string? responseBody,
+        long durationMs,
+        DateTime attemptedAt)
+    {
+        return new
         {
             id = attemptId,
-            targetUrl,
-            statusCode = (int?)null,
-            responseBody = (string?)null,
+            targetUrl = payload.TargetUrl,
+            statusCode,
+            responseBody,
             durationMs = (int)durationMs,
-            attemptedAt
-        }, statusCode: 502);
+            attemptedAt,
+            requestHeaders = payload.Headers,
+            requestBody = payload.BodyText
+        };
     }
 
     private static async Task InsertAttemptAsync(
@@ -192,6 +284,7 @@ public static class ReplayWebhook
         string? responseBody,
         long durationMs,
         DateTime attemptedAt,
+        EffectivePayload payload,
         CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand(InsertSql, connection);
@@ -204,8 +297,9 @@ public static class ReplayWebhook
             responseBody is null ? DBNull.Value : responseBody;
         command.Parameters.Add("duration_ms", NpgsqlDbType.Integer).Value = (int)durationMs;
         command.Parameters.Add("attempted_at", NpgsqlDbType.TimestampTz).Value = attemptedAt;
+        command.Parameters.Add("request_headers", NpgsqlDbType.Jsonb).Value =
+            JsonSerializer.Serialize(payload.Headers);
+        command.Parameters.Add("request_body", NpgsqlDbType.Text).Value = payload.BodyText;
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
-
-    private sealed record StoredRequest(string Method, JsonElement Headers, string BodyText, string ForwardUrl);
 }

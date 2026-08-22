@@ -132,6 +132,123 @@ public sealed class WebhookReplayApiTests
         Assert.Equal(JsonValueKind.Null, attemptItems[0].GetProperty("statusCode").ValueKind);
     }
 
+    [Fact]
+    public async Task Replay_with_body_and_targetUrl_overrides_sends_new_body_to_new_url_and_snapshots_it()
+    {
+        var (port, listener) = StartStubListener();
+        try
+        {
+            var captured = CaptureOneRequestOnce(listener);
+
+            var slug = NewSlug();
+            await _fixture.SeedEndpointAsync(slug, "http://127.0.0.1:1/unused");
+
+            var client = _fixture.CreateClient();
+            using var post = new StringContent("""{"orderId":456}""", Encoding.UTF8, "application/json");
+            using var ingest = await client.PostAsync($"/hooks/{slug}", post);
+            Assert.Equal(HttpStatusCode.NoContent, ingest.StatusCode);
+
+            var webhookId = await GetSingleWebhookIdAsync(client, slug);
+
+            using var overrides = new StringContent(
+                $$"""{"targetUrl":"http://127.0.0.1:{{port}}/override-target","body":"new-body"}""",
+                Encoding.UTF8, "application/json");
+            using var replay = await client.PostAsync($"/api/webhooks/{webhookId}/replay", overrides);
+            Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
+
+            var delivery = await captured.Task;
+            Assert.EndsWith("/override-target", delivery.Path);
+            Assert.Equal("new-body", delivery.Body);
+
+            using var replayDocument = JsonDocument.Parse(await replay.Content.ReadAsStringAsync());
+            var root = replayDocument.RootElement;
+            Assert.Equal(204, root.GetProperty("statusCode").GetInt32());
+            Assert.Equal("new-body", root.GetProperty("requestBody").GetString());
+            Assert.True(root.GetProperty("requestHeaders")
+                .TryGetProperty("Content-Type", out var contentType));
+            Assert.Contains("application/json", contentType[0].GetString());
+
+            using var attempts = await client.GetAsync($"/api/webhooks/{webhookId}/attempts");
+            Assert.Equal(HttpStatusCode.OK, attempts.StatusCode);
+            using var attemptsDocument = JsonDocument.Parse(await attempts.Content.ReadAsStringAsync());
+            Assert.Equal(1, attemptsDocument.RootElement.GetProperty("items").GetArrayLength());
+        }
+        finally
+        {
+            listener.Stop();
+            listener.Close();
+        }
+    }
+
+    [Fact]
+    public async Task Replay_without_body_keeps_stored_payload_and_snapshots_effective_values()
+    {
+        var (port, listener) = StartStubListener();
+        try
+        {
+            var captured = CaptureOneRequestOnce(listener);
+
+            var slug = NewSlug();
+            await _fixture.SeedEndpointAsync(slug, $"http://127.0.0.1:{port}/target");
+
+            var client = _fixture.CreateClient();
+            using var post = new StringContent("""{"orderId":456}""", Encoding.UTF8, "application/json");
+            using var ingest = await client.PostAsync($"/hooks/{slug}", post);
+            Assert.Equal(HttpStatusCode.NoContent, ingest.StatusCode);
+
+            var webhookId = await GetSingleWebhookIdAsync(client, slug);
+
+            using var replay = await client.PostAsync($"/api/webhooks/{webhookId}/replay", null);
+            Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
+
+            var delivery = await captured.Task;
+            Assert.EndsWith("/target", delivery.Path);
+            Assert.Equal("""{"orderId":456}""", delivery.Body);
+
+            using var replayDocument = JsonDocument.Parse(await replay.Content.ReadAsStringAsync());
+            var root = replayDocument.RootElement;
+            Assert.Equal(204, root.GetProperty("statusCode").GetInt32());
+            Assert.Equal("""{"orderId":456}""", root.GetProperty("requestBody").GetString());
+            Assert.True(root.GetProperty("requestHeaders")
+                .TryGetProperty("Content-Type", out var contentType));
+            Assert.Contains("application/json", contentType[0].GetString());
+            Assert.EndsWith("/target", root.GetProperty("targetUrl").GetString());
+        }
+        finally
+        {
+            listener.Stop();
+            listener.Close();
+        }
+    }
+
+    [Fact]
+    public async Task Replay_with_invalid_targetUrl_override_returns_400_and_records_nothing()
+    {
+        var slug = NewSlug();
+        await _fixture.SeedEndpointAsync(slug, "http://127.0.0.1:1/unused");
+
+        var client = _fixture.CreateClient();
+        using var post = new StringContent("""{"orderId":789}""", Encoding.UTF8, "application/json");
+        using var ingest = await client.PostAsync($"/hooks/{slug}", post);
+        Assert.Equal(HttpStatusCode.NoContent, ingest.StatusCode);
+
+        var webhookId = await GetSingleWebhookIdAsync(client, slug);
+
+        using var overrides = new StringContent(
+            """{"targetUrl":"not-an-absolute-url"}""",
+            Encoding.UTF8, "application/json");
+        using var replay = await client.PostAsync($"/api/webhooks/{webhookId}/replay", overrides);
+        Assert.Equal(HttpStatusCode.BadRequest, replay.StatusCode);
+
+        using var replayDocument = JsonDocument.Parse(await replay.Content.ReadAsStringAsync());
+        Assert.Contains("absolute", replayDocument.RootElement.GetProperty("error").GetString());
+
+        using var attempts = await client.GetAsync($"/api/webhooks/{webhookId}/attempts");
+        Assert.Equal(HttpStatusCode.OK, attempts.StatusCode);
+        using var attemptsDocument = JsonDocument.Parse(await attempts.Content.ReadAsStringAsync());
+        Assert.Equal(0, attemptsDocument.RootElement.GetProperty("items").GetArrayLength());
+    }
+
     private static string NewSlug() => $"it-{Guid.NewGuid():N}";
 
     private async Task<Guid> GetSingleWebhookIdAsync(HttpClient client, string slug)
@@ -187,4 +304,20 @@ public sealed class WebhookReplayApiTests
         context.Response.StatusCode = 204;
         context.Response.Close();
     });
+
+    private static TaskCompletionSource<(string Path, string Body)> CaptureOneRequestOnce(
+        HttpListener listener)
+    {
+        var captured = new TaskCompletionSource<(string Path, string Body)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _ = Task.Run(async () =>
+        {
+            var context = await listener.GetContextAsync();
+            using var reader = new StreamReader(context.Request.InputStream, Encoding.UTF8);
+            var body = await reader.ReadToEndAsync();
+            captured.SetResult((context.Request.Url?.PathAndQuery ?? "/", body));
+            context.Response.StatusCode = 204;
+            context.Response.Close();
+        });
+        return captured;
+    }
 }
