@@ -20,8 +20,10 @@ visible in history exactly like today's attempts.
   capped at **10s**.
 - TOTAL added waiting budget capped at **~15s regardless of configuration**. Replay is a
   synchronous user-facing call: someone is watching a spinner, so no config may turn it into a
-  minutes-long hang. The budget caps WAITING, not tries — once the budget is spent, remaining
-  tries execute immediately.
+  minutes-long hang. When the budget is spent, the retry loop STOPS and the last recorded
+  attempt is returned — exhausted budget means no more waiting AND no more hammering of a dead
+  target. The only way to get instant back-to-back retries is the explicit
+  `BackoffBaseSeconds=0` opt-in, which never touches the budget guard.
 - Retry triggers: transport failure/timeout (null status) OR HTTP status >= 500. NEVER on
   success (< 500) and never on 4xx — a 4xx is a definitive answer from the target, retrying it
   would just multiply noise.
@@ -51,7 +53,7 @@ visible in history exactly like today's attempts.
 | D1 | `HandleAsync` delegates to a small `SendWithRetriesAsync` wrapper that loops the existing `SendAndRecordAsync(connection, requestId, effectivePayload, httpClientFactory, ct)` seam once per try. The seam itself keeps ONE responsibility: build + send + record one attempt. | Stacking contract with PR #10 kept intact: one call = one recorded try. The policy lives in the wrapper, so the per-attempt code path PR #10 shaped remains recognizable and untouched in its internals. |
 | D2 | `SendAndRecordAsync` returns `(Response, StatusCode?)` instead of bare `IResult`; `StatusCode == null` means transport-level failure. The wrapper decides continuation purely from that pair. | The wrapper needs the outcome, not the HTTP envelope. Returning both avoids re-inspecting `IResult` and keeps "did we talk to the target?" expressible as a nullable int. |
 | D3 | Config read once at startup via `AddReplayRetries(this IServiceCollection, IConfiguration)` extension registering a `ReplayRetryOptions(MaxAttempts, BackoffBaseSeconds)` singleton; `MaxAttempts` clamped to `[1, 10]`, `BackoffBaseSeconds` floored at 0. Defaults live in code, not appsettings.json. | Mirrors `AddIngestRateLimiting`/`AddWebhookRetention` exactly (section-style keys + `GetValue` + code defaults; neither of those ships an appsettings section either). The clamp bounds audit-log writes: a typo like `MaxAttempts=10000` cannot spray ten thousand attempt rows against one replay click. |
-| D4 | Backoff before retry N+1 = `min(base * 2^(N-1), 10s, remaining budget)`, budget starts at 15s and decrements per wait. | Exponential spacing gives transient blips room to clear while converging fast; the 10s per-wait cap plus 15s global budget make worst-case added latency predictable (~15s) no matter what ops configure. |
+| D4 | Backoff before retry N+1 = `min(base * 2^(N-1), 10s, remaining budget)`, budget starts at 15s and decrements per wait. Once the budget reaches zero with a nonzero configured base, the loop stops and returns the last recorded attempt. | Exponential spacing gives transient blips room to clear while converging fast; the 10s per-wait cap plus 15s global budget make worst-case added latency predictable (~15s). Stopping on exhaustion (rather than continuing with zero delay) keeps the budget meaningful as burst protection: a dead target never receives instant-fire attempts. `BackoffBaseSeconds=0` is exempt — it is the explicit "retry immediately, no spacing" configuration and cannot silently degrade to a single attempt. |
 | D5 | Outer `cancellationToken` honored during backoff waits: if it fires mid-wait, the loop stops and the ALREADY-RECORDED last attempt's response is returned best-effort. | The client hung up; finishing the loop would waste calls nobody will read. Returning the recorded result preserves the invariant "every completed try is answerable from the response" without throwing past the framework. |
 | D6 | Retry predicate: `attemptNumber < MaxAttempts && (statusCode is null || statusCode >= 500)`. Per-attempt 30s send timeout (linked to caller token) unchanged per try. | Precise encoding of the trigger rule. Success and definitive answers (any 2xx–4xx) stop the loop immediately; only "no answer" or "server-side maybe-transient" justify another try. |
 | D7 | No schema, endpoint-shape, or UI changes. Multiple attempts surface through the EXISTING attempts listing and the existing response envelope. | The whole feature is observable with zero contract churn because replay-edit already snapshots payloads per attempt and lists them. Consumers see "more rows in history", nothing else. |
@@ -65,7 +67,8 @@ visible in history exactly like today's attempts.
 | AC3 | `Retry:MaxAttempts=3`, `Retry:BackoffBaseSeconds=0`, stub returns 500 then 204 | Replay | Loop stops after the success: exactly 2 attempts recorded (one 500, one 204), NO further stub hits, final envelope `statusCode: 204` |
 | AC4 | `Retry:MaxAttempts=3`, target unreachable (transport failure every try) | Replay | `502` envelope with null `statusCode`, exactly 3 null-status attempt rows |
 | AC5 | `Retry:MaxAttempts=3`, `Retry:BackoffBaseSeconds=1`, always-500 stub | Measure replay wall time | Elapsed >= ~3s (waits of 1s + 2s really happened) and far below any budget-blowing figure; observed values reported, upper bounds sanity-checked manually |
-| AC6 | Full solution | `dotnet build` + `dotnet test` | Green including all pre-existing tests unmodified |
+| AC6 | `Retry:MaxAttempts=4`, `Retry:BackoffBaseSeconds=15`, always-500 stub (waits 10s + 5s exhaust the budget) | Replay | Loop stops EARLY after exactly 3 attempts (< MaxAttempts) once the budget is gone, final envelope reflects last attempt; zero-delay hammering never occurs |
+| AC7 | Full solution | `dotnet build` + `dotnet test` | Green including all pre-existing tests unmodified |
 
 ## Contract deltas
 
@@ -87,6 +90,7 @@ envelope wraps the last try per D6/D7 rules above.
 Integration suite (`WebhookReplay.Api.Tests`, Testcontainers + WebApplicationFactory): a
 secondary factory instance sharing the fixture's Postgres container overrides `Retry:*` via
 `UseSetting`; deterministic counting stub listeners (sequential `HttpListener` accept loops)
-serve scripted status sequences. AC1–AC4 covered by four new tests (hit counts, row counts,
-status multisets, final envelopes); AC5 lower-bound wall-clock assertion inside the AC2 test
-plus reported timings; AC6 by suite greenness.
+serve scripted status sequences. AC1–AC5 covered by five new tests (hit counts, row counts,
+status multisets, final envelopes, wall-clock lower bound); AC6 by a base=15 exhaustion test
+proving the early stop (exactly MaxAttempts−1 attempts, elapsed >= ~15s); AC7 by suite
+greenness.

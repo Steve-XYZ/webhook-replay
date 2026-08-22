@@ -392,6 +392,51 @@ public sealed class WebhookReplayApiTests
     }
 
     [Fact]
+    public async Task Replay_stops_retrying_when_backoff_budget_is_exhausted()
+    {
+        await using var retryFactory = new RetryingApiFactory(_fixture.ConnectionString, maxAttempts: 4, backoffBaseSeconds: 15);
+        var client = retryFactory.CreateClient();
+
+        var (port, listener) = StartStubListener();
+        try
+        {
+            var requestsServed = RespondWithStatuses(listener, 500);
+
+            var slug = NewSlug();
+            await _fixture.SeedEndpointAsync(slug, $"http://127.0.0.1:{port}/target");
+
+            using var post = new StringContent("""{"orderId":456}""", Encoding.UTF8, "application/json");
+            using var ingest = await client.PostAsync($"/hooks/{slug}", post);
+            Assert.Equal(HttpStatusCode.NoContent, ingest.StatusCode);
+
+            var webhookId = await GetSingleWebhookIdAsync(client, slug);
+
+            var stopwatch = Stopwatch.StartNew();
+            using var replay = await client.PostAsync($"/api/webhooks/{webhookId}/replay", null);
+            stopwatch.Stop();
+            Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
+
+            using var replayDocument = JsonDocument.Parse(await replay.Content.ReadAsStringAsync());
+            Assert.Equal(500, replayDocument.RootElement.GetProperty("statusCode").GetInt32());
+
+            Assert.Equal(3, requestsServed());
+
+            using var attempts = await client.GetAsync($"/api/webhooks/{webhookId}/attempts");
+            attempts.EnsureSuccessStatusCode();
+
+            using var attemptsDocument = JsonDocument.Parse(await attempts.Content.ReadAsStringAsync());
+            Assert.Equal(3, attemptsDocument.RootElement.GetProperty("items").GetArrayLength());
+
+            Assert.True(stopwatch.Elapsed.TotalSeconds >= 14.5);
+        }
+        finally
+        {
+            listener.Stop();
+            listener.Close();
+        }
+    }
+
+    [Fact]
     public async Task Replay_returns_502_and_records_every_transport_failure_when_retries_enabled()
     {
         await using var retryFactory = new RetryingApiFactory(_fixture.ConnectionString, maxAttempts: 3, backoffBaseSeconds: 0);

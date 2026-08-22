@@ -80,17 +80,13 @@ public static class ReplayWebhook
         {
             var outcome = await SendAndRecordAsync(connection, requestId, payload, httpClientFactory, cancellationToken);
             if (attemptNumber >= retries.MaxAttempts ||
-                (outcome.StatusCode is not null && outcome.StatusCode < 500))
+                (outcome.StatusCode is not null && outcome.StatusCode < 500) ||
+                (retries.BackoffBaseSeconds > 0 && remainingBudgetSeconds <= 0))
             {
                 return outcome.Response;
             }
 
             var delaySeconds = ComputeDelaySeconds(attemptNumber, retries.BackoffBaseSeconds, ref remainingBudgetSeconds);
-            if (delaySeconds <= 0)
-            {
-                continue;
-            }
-
             try
             {
                 await Task.Delay(TimeSpan.FromSeconds(delaySeconds), cancellationToken);
