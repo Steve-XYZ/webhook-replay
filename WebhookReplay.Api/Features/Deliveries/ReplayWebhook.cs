@@ -12,6 +12,8 @@ public static class ReplayWebhook
     private const int MaxResponseBytes = 65537;
     private const int MaxResponseChars = 65536;
 
+    private const string TargetUrlError = "Target URL must be an absolute http(s) URL.";
+
     private const string SelectSql = """
         SELECT wr.method, wr.headers::text, wr.body_text, e.forward_url
         FROM webhook_requests wr
@@ -42,6 +44,11 @@ public static class ReplayWebhook
             return Results.BadRequest(new { error = overrides.Error });
         }
 
+        if (overrides.Value?.TargetUrl is { } overrideUrl && !IsAbsoluteHttpUrl(overrideUrl))
+        {
+            return Results.BadRequest(new { error = TargetUrlError });
+        }
+
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
 
         var stored = await LoadStoredRequestAsync(connection, requestId, cancellationToken);
@@ -51,10 +58,9 @@ public static class ReplayWebhook
         }
 
         var payload = ResolveEffectivePayload(stored, overrides.Value);
-        if (!Uri.TryCreate(payload.TargetUrl, UriKind.Absolute, out var targetUri) ||
-            (targetUri.Scheme != Uri.UriSchemeHttp && targetUri.Scheme != Uri.UriSchemeHttps))
+        if (!IsAbsoluteHttpUrl(payload.TargetUrl))
         {
-            return Results.BadRequest(new { error = "Target URL must be an absolute http(s) URL." });
+            return Results.BadRequest(new { error = TargetUrlError });
         }
 
         return await SendAndRecordAsync(connection, requestId, payload, httpClientFactory, cancellationToken);
@@ -123,6 +129,10 @@ public static class ReplayWebhook
             headers,
             overrides.Body ?? stored.BodyText);
     }
+
+    private static bool IsAbsoluteHttpUrl(string url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var uri) &&
+        (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
 
     private static async Task<IResult> SendAndRecordAsync(
         NpgsqlConnection connection,

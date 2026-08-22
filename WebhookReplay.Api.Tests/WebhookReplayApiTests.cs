@@ -2,6 +2,8 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 using Xunit;
 
 namespace WebhookReplay.Api.Tests;
@@ -171,7 +173,21 @@ public sealed class WebhookReplayApiTests
             using var attempts = await client.GetAsync($"/api/webhooks/{webhookId}/attempts");
             Assert.Equal(HttpStatusCode.OK, attempts.StatusCode);
             using var attemptsDocument = JsonDocument.Parse(await attempts.Content.ReadAsStringAsync());
-            Assert.Equal(1, attemptsDocument.RootElement.GetProperty("items").GetArrayLength());
+            var attemptItems = attemptsDocument.RootElement.GetProperty("items");
+            Assert.Equal(1, attemptItems.GetArrayLength());
+            Assert.Equal("new-body", attemptItems[0].GetProperty("requestBody").GetString());
+            Assert.True(attemptItems[0].GetProperty("requestHeaders")
+                .TryGetProperty("Content-Type", out var storedContentType));
+            Assert.Contains("application/json", storedContentType[0].GetString());
+
+            using var detail = await client.GetAsync($"/api/webhooks/{webhookId}");
+            Assert.Equal(HttpStatusCode.OK, detail.StatusCode);
+            using var detailDocument = JsonDocument.Parse(await detail.Content.ReadAsStringAsync());
+            var detailAttempt = detailDocument.RootElement.GetProperty("attempts")[0];
+            Assert.Equal("new-body", detailAttempt.GetProperty("requestBody").GetString());
+            Assert.True(detailAttempt.GetProperty("requestHeaders")
+                .TryGetProperty("Content-Type", out var detailContentType));
+            Assert.Contains("application/json", detailContentType[0].GetString());
         }
         finally
         {
@@ -213,6 +229,15 @@ public sealed class WebhookReplayApiTests
                 .TryGetProperty("Content-Type", out var contentType));
             Assert.Contains("application/json", contentType[0].GetString());
             Assert.EndsWith("/target", root.GetProperty("targetUrl").GetString());
+
+            using var attempts = await client.GetAsync($"/api/webhooks/{webhookId}/attempts");
+            Assert.Equal(HttpStatusCode.OK, attempts.StatusCode);
+            using var attemptsDocument = JsonDocument.Parse(await attempts.Content.ReadAsStringAsync());
+            var attemptItem = attemptsDocument.RootElement.GetProperty("items")[0];
+            Assert.Equal("""{"orderId":456}""", attemptItem.GetProperty("requestBody").GetString());
+            Assert.True(attemptItem.GetProperty("requestHeaders")
+                .TryGetProperty("Content-Type", out var listContentType));
+            Assert.Contains("application/json", listContentType[0].GetString());
         }
         finally
         {
@@ -247,6 +272,54 @@ public sealed class WebhookReplayApiTests
         Assert.Equal(HttpStatusCode.OK, attempts.StatusCode);
         using var attemptsDocument = JsonDocument.Parse(await attempts.Content.ReadAsStringAsync());
         Assert.Equal(0, attemptsDocument.RootElement.GetProperty("items").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task Attempts_read_endpoints_map_legacy_null_snapshots_to_null()
+    {
+        var slug = NewSlug();
+        var endpointId = await _fixture.SeedEndpointAsync(slug, "http://127.0.0.1:1/unused");
+
+        var dataSource = _fixture.Services.GetRequiredService<NpgsqlDataSource>();
+        var requestId = Guid.CreateVersion7();
+        await using (var connection = await dataSource.OpenConnectionAsync())
+        {
+            await using var insertRequest = new NpgsqlCommand(
+                """
+                INSERT INTO webhook_requests (id, endpoint_id, method, headers, body_text)
+                VALUES (@id, @endpoint_id, 'POST', '{"Content-Type":["application/json"]}'::jsonb, 'stored')
+                """,
+                connection);
+            insertRequest.Parameters.AddWithValue("id", requestId);
+            insertRequest.Parameters.AddWithValue("endpoint_id", endpointId);
+            await insertRequest.ExecuteNonQueryAsync();
+
+            await using var insertAttempt = new NpgsqlCommand(
+                """
+                INSERT INTO delivery_attempts (id, webhook_request_id, target_url, duration_ms)
+                VALUES (@id, @request_id, 'http://127.0.0.1:1/x', 5)
+                """,
+                connection);
+            insertAttempt.Parameters.AddWithValue("id", Guid.CreateVersion7());
+            insertAttempt.Parameters.AddWithValue("request_id", requestId);
+            await insertAttempt.ExecuteNonQueryAsync();
+        }
+
+        var client = _fixture.CreateClient();
+
+        using var list = await client.GetAsync($"/api/webhooks/{requestId}/attempts");
+        Assert.Equal(HttpStatusCode.OK, list.StatusCode);
+        using var listDocument = JsonDocument.Parse(await list.Content.ReadAsStringAsync());
+        var listItem = listDocument.RootElement.GetProperty("items")[0];
+        Assert.Equal(JsonValueKind.Null, listItem.GetProperty("requestHeaders").ValueKind);
+        Assert.Equal(JsonValueKind.Null, listItem.GetProperty("requestBody").ValueKind);
+
+        using var detail = await client.GetAsync($"/api/webhooks/{requestId}");
+        Assert.Equal(HttpStatusCode.OK, detail.StatusCode);
+        using var detailDocument = JsonDocument.Parse(await detail.Content.ReadAsStringAsync());
+        var detailAttempt = detailDocument.RootElement.GetProperty("attempts")[0];
+        Assert.Equal(JsonValueKind.Null, detailAttempt.GetProperty("requestHeaders").ValueKind);
+        Assert.Equal(JsonValueKind.Null, detailAttempt.GetProperty("requestBody").ValueKind);
     }
 
     private static string NewSlug() => $"it-{Guid.NewGuid():N}";
