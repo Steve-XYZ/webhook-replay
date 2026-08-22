@@ -14,14 +14,20 @@ export default function AttemptsPanel({ webhookId, initialAttempts }: Props) {
   const [replaying, setReplaying] = useState(false);
   const [result, setResult] = useState<Attempt | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [overrideTargetUrl, setOverrideTargetUrl] = useState("");
+  const [overrideBody, setOverrideBody] = useState("");
 
-  async function replay() {
+  async function runReplay(overrides?: { targetUrl?: string; body?: string }) {
     setReplaying(true);
     setError(null);
     setResult(null);
     try {
       const res = await fetch(`/api/webhooks/${webhookId}/replay`, {
         method: "POST",
+        ...(overrides && {
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(overrides),
+        }),
       });
       const attempt = (await res.json()) as Attempt;
       if (!res.ok && res.status !== 502) {
@@ -40,6 +46,18 @@ export default function AttemptsPanel({ webhookId, initialAttempts }: Props) {
     } finally {
       setReplaying(false);
     }
+  }
+
+  function replay() {
+    return runReplay({});
+  }
+
+  async function replayWithOverrides(e: React.FormEvent) {
+    e.preventDefault();
+    await runReplay({
+      ...(overrideTargetUrl.trim() && { targetUrl: overrideTargetUrl.trim() }),
+      ...(overrideBody !== "" && { body: overrideBody }),
+    });
   }
 
   return (
@@ -61,6 +79,53 @@ export default function AttemptsPanel({ webhookId, initialAttempts }: Props) {
           {replaying ? "Replaying…" : "Replay"}
         </button>
       </div>
+      <details style={{ marginTop: 12 }}>
+        <summary
+          className="dim"
+          style={{ cursor: "pointer", userSelect: "none" }}
+        >
+          Replay with overrides
+        </summary>
+        <form
+          onSubmit={replayWithOverrides}
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 10,
+            marginTop: 10,
+          }}
+        >
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span className="dim">Target URL (optional)</span>
+            <input
+              type="text"
+              className="input"
+              placeholder="http://localhost:5803/debug"
+              value={overrideTargetUrl}
+              onChange={(e) => setOverrideTargetUrl(e.target.value)}
+            />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span className="dim">Body (optional, replaces stored body)</span>
+            <textarea
+              className="input"
+              rows={5}
+              placeholder='{"orderId":123,"status":"retried"}'
+              value={overrideBody}
+              onChange={(e) => setOverrideBody(e.target.value)}
+            />
+          </label>
+          <div>
+            <button
+              type="submit"
+              className="btn btn-primary"
+              disabled={replaying}
+            >
+              {replaying ? "Replaying…" : "Replay with overrides"}
+            </button>
+          </div>
+        </form>
+      </details>
       {error && <div className="error-banner">{error}</div>}
       {result && (
         <div className="replay-result">

@@ -13,7 +13,8 @@ public static class GetWebhook
         """;
 
     private const string SelectAttemptsSql = """
-        SELECT id, target_url, status_code, response_body, duration_ms, attempted_at
+        SELECT id, target_url, status_code, response_body, duration_ms, attempted_at,
+               request_headers::text AS request_headers, request_body
         FROM delivery_attempts
         WHERE webhook_request_id = @id
         ORDER BY attempted_at DESC
@@ -65,6 +66,7 @@ public static class GetWebhook
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
+                var requestHeadersJson = reader.IsDBNull(6) ? null : reader.GetString(6);
                 attempts.Add(new
                 {
                     id = reader.GetGuid(0),
@@ -72,7 +74,11 @@ public static class GetWebhook
                     statusCode = reader.IsDBNull(2) ? (int?)null : reader.GetInt32(2),
                     responseBody = reader.IsDBNull(3) ? null : reader.GetString(3),
                     durationMs = reader.GetInt32(4),
-                    attemptedAt = reader.GetDateTime(5)
+                    attemptedAt = reader.GetDateTime(5),
+                    requestHeaders = requestHeadersJson is null
+                        ? null
+                        : (JsonElement?)JsonSerializer.Deserialize<JsonElement>(requestHeadersJson),
+                    requestBody = reader.IsDBNull(7) ? null : reader.GetString(7)
                 });
             }
         }
