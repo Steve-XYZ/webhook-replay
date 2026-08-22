@@ -8,6 +8,8 @@ export default function EndpointForm() {
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [forwardUrl, setForwardUrl] = useState("");
+  const [secret, setSecret] = useState("");
+  const [createdSecret, setCreatedSecret] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -19,12 +21,20 @@ export default function EndpointForm() {
       const res = await fetch("/api/endpoints", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, slug, forwardUrl }),
+        body: JSON.stringify({
+          name,
+          slug,
+          forwardUrl,
+          secret: secret.trim() || undefined,
+        }),
       });
       if (res.ok) {
+        const body = (await res.json()) as { secret?: string | null };
         setName("");
         setSlug("");
         setForwardUrl("");
+        setSecret("");
+        setCreatedSecret(body.secret ?? null);
         router.refresh();
       } else {
         let message = `Request failed with HTTP ${res.status}`;
@@ -66,6 +76,15 @@ export default function EndpointForm() {
           onChange={(e) => setForwardUrl(e.target.value)}
           aria-label="Forward URL"
         />
+        <input
+          className="input"
+          type="password"
+          autoComplete="new-password"
+          placeholder="HMAC secret (optional)"
+          value={secret}
+          onChange={(e) => setSecret(e.target.value)}
+          aria-label="HMAC secret"
+        />
         <button
           type="submit"
           className="btn btn-primary"
@@ -76,6 +95,19 @@ export default function EndpointForm() {
         {error && (
           <div role="alert" className="field-error">
             {error}
+          </div>
+        )}
+        {createdSecret && (
+          <div role="status" style={{ display: "grid", gap: 6 }}>
+            <span>HMAC secret — shown once, copy it now:</span>
+            <input
+              className="input"
+              type="password"
+              readOnly
+              value={createdSecret}
+              aria-label="Created HMAC secret (shown once)"
+              onFocus={(e) => e.target.select()}
+            />
           </div>
         )}
       </div>

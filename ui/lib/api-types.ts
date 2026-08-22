@@ -279,6 +279,7 @@ export interface components {
             name: string;
             slug: string;
             forwardUrl: string;
+            secret?: string;
         };
     };
     responses: never;

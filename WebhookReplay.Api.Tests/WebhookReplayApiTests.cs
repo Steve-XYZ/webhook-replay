@@ -1,5 +1,7 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Xunit;
@@ -132,7 +134,136 @@ public sealed class WebhookReplayApiTests
         Assert.Equal(JsonValueKind.Null, attemptItems[0].GetProperty("statusCode").ValueKind);
     }
 
+    [Fact]
+    public async Task ReceiveWebhook_with_valid_signature_returns_204_and_stores_request()
+    {
+        const string body = """{"orderId":123,"status":"paid"}""";
+        var slug = NewSlug("hmac-valid");
+        const string secret = "whsec-it-valid";
+        await _fixture.SeedEndpointAsync(slug, "http://127.0.0.1:1/unused", secret);
+
+        var client = _fixture.CreateClient();
+        using var response = await PostIngestAsync(client, slug, body, $"sha256={ComputeHmacHex(secret, body)}");
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        var webhookId = await GetSingleWebhookIdAsync(client, slug);
+
+        using var detail = await client.GetAsync($"/api/webhooks/{webhookId}");
+        using var document = JsonDocument.Parse(await detail.Content.ReadAsStringAsync());
+        Assert.Equal(body, document.RootElement.GetProperty("bodyText").GetString());
+    }
+
+    [Fact]
+    public async Task ReceiveWebhook_with_invalid_signature_returns_401_and_is_not_stored()
+    {
+        var slug = NewSlug("hmac-invalid");
+        var endpointId = await _fixture.SeedEndpointAsync(
+            slug, "http://127.0.0.1:1/unused", "whsec-it-invalid");
+
+        var client = _fixture.CreateClient();
+        using var wrongDigest = await PostIngestAsync(client, slug, """{"orderId":1}""", "sha256=" + new string('0', 64));
+        Assert.Equal(HttpStatusCode.Unauthorized, wrongDigest.StatusCode);
+
+        using var malformed = await PostIngestAsync(client, slug, """{"orderId":1}""", "not-a-signature");
+        Assert.Equal(HttpStatusCode.Unauthorized, malformed.StatusCode);
+
+        Assert.Equal(0, await CountWebhooksAsync(client, endpointId));
+    }
+
+    [Fact]
+    public async Task ReceiveWebhook_with_missing_signature_header_on_secret_endpoint_returns_401_and_is_not_stored()
+    {
+        var slug = NewSlug("hmac-missing");
+        var endpointId = await _fixture.SeedEndpointAsync(
+            slug, "http://127.0.0.1:1/unused", "whsec-it-missing");
+
+        var client = _fixture.CreateClient();
+        using var post = new StringContent("""{"orderId":2}""", Encoding.UTF8, "application/json");
+        using var response = await client.PostAsync($"/hooks/{slug}", post);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+
+        Assert.Equal(0, await CountWebhooksAsync(client, endpointId));
+    }
+
+    [Fact]
+    public async Task ReceiveWebhook_unsigned_request_against_no_secret_endpoint_still_works()
+    {
+        var slug = NewSlug("hmac-nosecret");
+        var endpointId = await _fixture.SeedEndpointAsync(slug, "http://127.0.0.1:1/unused");
+
+        var client = _fixture.CreateClient();
+        using var post = new StringContent("""{"orderId":3}""", Encoding.UTF8, "application/json");
+        using var response = await client.PostAsync($"/hooks/{slug}", post);
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        Assert.Equal(1, await CountWebhooksAsync(client, endpointId));
+    }
+
+    [Fact]
+    public async Task CreateEndpoint_echoes_secret_only_in_creation_response()
+    {
+        var slug = NewSlug("hmac-echo");
+        var client = _fixture.CreateClient();
+
+        using var content = new StringContent(
+            JsonSerializer.Serialize(new
+            {
+                name = "Echo",
+                slug,
+                forwardUrl = "http://127.0.0.1:1/x",
+                secret = "whsec-it-echo"
+            }),
+            Encoding.UTF8,
+            "application/json");
+        using var created = await client.PostAsync("/api/endpoints", content);
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+
+        using var createdDocument = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
+        Assert.Equal("whsec-it-echo", createdDocument.RootElement.GetProperty("secret").GetString());
+        var id = createdDocument.RootElement.GetProperty("id").GetString();
+
+        using var fetched = await client.GetAsync($"/api/endpoints/{id}");
+        using var fetchedDocument = JsonDocument.Parse(await fetched.Content.ReadAsStringAsync());
+        Assert.False(fetchedDocument.RootElement.TryGetProperty("secret", out _));
+
+        using var list = await client.GetAsync("/api/endpoints");
+        using var listDocument = JsonDocument.Parse(await list.Content.ReadAsStringAsync());
+        Assert.DoesNotContain(
+            listDocument.RootElement.GetProperty("items").EnumerateArray(),
+            item => item.TryGetProperty("secret", out _));
+    }
+
     private static string NewSlug() => $"it-{Guid.NewGuid():N}";
+
+    private static string NewSlug(string prefix) => $"{prefix}-{Guid.NewGuid():N}";
+
+    private static async Task<HttpResponseMessage> PostIngestAsync(
+        HttpClient client,
+        string slug,
+        string body,
+        string signature)
+    {
+        using var content = new ByteArrayContent(Encoding.UTF8.GetBytes(body));
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/hooks/{slug}") { Content = content };
+        request.Headers.Add("X-Webhook-Signature", signature);
+        return await client.SendAsync(request);
+    }
+
+    private static string ComputeHmacHex(string secret, string body)
+    {
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
+        return Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(body))).ToLowerInvariant();
+    }
+
+    private async Task<int> CountWebhooksAsync(HttpClient client, Guid endpointId)
+    {
+        using var webhooks = await client.GetAsync($"/api/endpoints/{endpointId}/webhooks");
+        webhooks.EnsureSuccessStatusCode();
+
+        using var document = JsonDocument.Parse(await webhooks.Content.ReadAsStringAsync());
+        return document.RootElement.GetProperty("items").GetArrayLength();
+    }
 
     private async Task<Guid> GetSingleWebhookIdAsync(HttpClient client, string slug)
     {
