@@ -3,6 +3,7 @@ using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using WebhookReplay.Api.Features.Deliveries;
 using WebhookReplay.Api.Features.Endpoints;
+using WebhookReplay.Api.Features.Health;
 using WebhookReplay.Api.Features.Webhooks;
 using WebhookReplay.Api.Infrastructure;
 
@@ -16,6 +17,8 @@ builder.WebHost.ConfigureKestrel(options =>
 });
 
 builder.Services.AddOpenApi();
+
+builder.Services.AddWebhookHealthChecks();
 
 builder.Services.AddHttpClient();
 
@@ -53,5 +56,6 @@ app.MapGet("/api/endpoints/{endpointId}/webhooks", ListWebhooks.HandleAsync);
 app.MapGet("/api/webhooks/{id}", GetWebhook.HandleAsync);
 app.MapPost("/api/webhooks/{id}/replay", ReplayWebhook.HandleAsync);
 app.MapGet("/api/webhooks/{id}/attempts", GetDeliveryAttempts.HandleAsync);
+app.MapWebhookHealthEndpoints();
 
 app.Run();
