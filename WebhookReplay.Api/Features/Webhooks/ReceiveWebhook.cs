@@ -29,19 +29,32 @@ public static class ReceiveWebhook
         var bodyText = await ReadBodyAsync(request, cancellationToken);
         var headersJson = JsonSerializer.Serialize(
             request.Headers.ToDictionary(header => header.Key, header => header.Value.ToArray()));
+        var receivedAt = DateTime.UtcNow;
+        var webhookId = Guid.CreateVersion7();
 
         await using var command = new NpgsqlCommand(InsertSql, connection);
-        command.Parameters.Add("id", NpgsqlDbType.Uuid).Value = Guid.CreateVersion7();
+        command.Parameters.Add("id", NpgsqlDbType.Uuid).Value = webhookId;
         command.Parameters.Add("endpoint_id", NpgsqlDbType.Uuid).Value = endpointId.Value;
         command.Parameters.Add("method", NpgsqlDbType.Text).Value = request.Method;
         command.Parameters.Add("headers", NpgsqlDbType.Jsonb).Value = headersJson;
         command.Parameters.Add("body_text", NpgsqlDbType.Text).Value = bodyText;
         command.Parameters.Add("body_json", NpgsqlDbType.Jsonb).Value =
             IsValidJson(bodyText) ? bodyText : DBNull.Value;
-        command.Parameters.Add("received_at", NpgsqlDbType.TimestampTz).Value = DateTime.UtcNow;
+        command.Parameters.Add("received_at", NpgsqlDbType.TimestampTz).Value = receivedAt;
         await command.ExecuteNonQueryAsync(cancellationToken);
 
+        LiveFeed.Publish(endpointId.Value, BuildEventFrame(webhookId, request.Method, receivedAt, bodyText));
+
         return Results.NoContent();
+    }
+
+    private static readonly JsonSerializerOptions WebJson = new(JsonSerializerDefaults.Web);
+
+    private static string BuildEventFrame(Guid id, string method, DateTime receivedAt, string bodyText)
+    {
+        var preview = bodyText.Length <= 200 ? bodyText : bodyText[..200];
+        var data = JsonSerializer.Serialize(new { id, method, receivedAt, bodyPreview = preview }, WebJson);
+        return $"event: webhook\nid: {id}\ndata: {data}\n\n";
     }
 
     private static async Task<Guid?> FindEndpointIdAsync(

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { formatInstant, type WebhookSummary, type WebhooksPage } from "@/lib/api";
 
 type Props = {
@@ -17,6 +17,28 @@ export default function WebhookFeed({ endpointId, initialPage }: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [live, setLive] = useState(false);
+
+  useEffect(() => {
+    const source = new EventSource(`/api/endpoints/${endpointId}/events`);
+
+    source.addEventListener("open", () => setLive(true));
+    source.addEventListener("error", () => setLive(false));
+    source.addEventListener("webhook", (event) => {
+      try {
+        const item = JSON.parse(
+          (event as MessageEvent<string>).data,
+        ) as WebhookSummary;
+        setItems((prev) =>
+          prev.some((existing) => existing.id === item.id) ? prev : [item, ...prev],
+        );
+      } catch {
+        return;
+      }
+    });
+
+    return () => source.close();
+  }, [endpointId]);
 
   async function refresh() {
     setRefreshing(true);
@@ -65,7 +87,14 @@ export default function WebhookFeed({ endpointId, initialPage }: Props) {
           alignItems: "center",
         }}
       >
-        <h2>Requests ({items.length})</h2>
+        <h2>
+        Requests ({items.length})
+        <span
+          className={`live-dot ${live ? "on" : ""}`}
+          title={live ? "Live updates connected" : "Live feed connecting…"}
+          aria-label={live ? "Live" : "Connecting"}
+        />
+      </h2>
         <button
           type="button"
           className="btn"
