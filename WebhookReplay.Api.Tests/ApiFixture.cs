@@ -24,7 +24,7 @@ public sealed class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
         builder.UseSetting("ConnectionStrings:Default", _db.GetConnectionString());
     }
 
-    public async Task<Guid> SeedEndpointAsync(string slug, string forwardUrl)
+    public async Task<Guid> SeedEndpointAsync(string slug, string forwardUrl, string? secret = null)
     {
         var dataSource = Services.GetRequiredService<NpgsqlDataSource>();
         var endpointId = Guid.CreateVersion7();
@@ -32,14 +32,15 @@ public sealed class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
         await using var connection = await dataSource.OpenConnectionAsync();
         await using var command = new NpgsqlCommand(
             """
-            INSERT INTO endpoints (id, name, slug, forward_url)
-            VALUES (@id, @name, @slug, @forward_url)
+            INSERT INTO endpoints (id, name, slug, forward_url, secret)
+            VALUES (@id, @name, @slug, @forward_url, @secret)
             """,
             connection);
         command.Parameters.AddWithValue("id", endpointId);
         command.Parameters.AddWithValue("name", $"Endpoint {slug}");
         command.Parameters.AddWithValue("slug", slug);
         command.Parameters.AddWithValue("forward_url", forwardUrl);
+        command.Parameters.AddWithValue("secret", (object?)secret ?? DBNull.Value);
         await command.ExecuteNonQueryAsync();
 
         return endpointId;
