@@ -47,6 +47,7 @@ await DbMigrations.ApplyAsync(app.Services.GetRequiredService<NpgsqlDataSource>(
 
 app.MapPost("/hooks/{slug}", ReceiveWebhook.HandleAsync);
 app.MapPost("/api/endpoints", CreateEndpoint.HandleAsync);
+app.MapGet("/api/endpoints", ListEndpoints.HandleAsync);
 app.MapGet("/api/endpoints/{id}", GetEndpoint.HandleAsync);
 app.MapGet("/api/endpoints/{endpointId}/webhooks", ListWebhooks.HandleAsync);
 app.MapGet("/api/webhooks/{id}", GetWebhook.HandleAsync);
