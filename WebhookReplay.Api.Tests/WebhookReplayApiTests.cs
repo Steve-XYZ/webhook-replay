@@ -410,6 +410,95 @@ public sealed class WebhookReplayApiTests
             item => item.TryGetProperty("secret", out _));
     }
 
+    [Fact]
+    public async Task Events_unknown_endpoint_returns_404()
+    {
+        var client = _fixture.CreateClient();
+
+        using var unknownId = await client.GetAsync(
+            $"/api/endpoints/{Guid.NewGuid()}/events");
+        Assert.Equal(HttpStatusCode.NotFound, unknownId.StatusCode);
+
+        using var malformed = await client.GetAsync("/api/endpoints/not-a-guid/events");
+        Assert.Equal(HttpStatusCode.NotFound, malformed.StatusCode);
+    }
+
+    [Fact]
+    public async Task Events_stream_publishes_webhook_after_ingest()
+    {
+        var slug = NewSlug();
+        var endpointId = await _fixture.SeedEndpointAsync(slug, "http://127.0.0.1:1/unused");
+
+        var client = _fixture.CreateClient();
+        using var streamResponse = await client.GetAsync(
+            $"/api/endpoints/{endpointId}/events",
+            HttpCompletionOption.ResponseHeadersRead);
+        Assert.Equal(HttpStatusCode.OK, streamResponse.StatusCode);
+        Assert.Equal("text/event-stream", streamResponse.Content.Headers.ContentType!.MediaType);
+
+        using var post = new StringContent("""{"orderId":42,"status":"paid"}""", Encoding.UTF8, "application/json");
+        using var ingest = await client.PostAsync($"/hooks/{slug}", post);
+        Assert.Equal(HttpStatusCode.NoContent, ingest.StatusCode);
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        using var stream = await streamResponse.Content.ReadAsStreamAsync(timeout.Token);
+        using var reader = new StreamReader(stream);
+        var rawLines = new List<string>();
+        string? dataLine = null;
+        try
+        {
+            while (!timeout.Token.IsCancellationRequested)
+            {
+                var line = await reader.ReadLineAsync(timeout.Token);
+                if (line is null)
+                {
+                    break;
+                }
+                rawLines.Add(line);
+
+                if (dataLine is null && line.StartsWith("data: ", StringComparison.Ordinal))
+                {
+                    var candidate = line["data: ".Length..];
+                    using var probe = JsonDocument.Parse(candidate);
+                    if (probe.RootElement.GetProperty("bodyPreview").GetString()!.Contains("orderId"))
+                    {
+                        dataLine = candidate;
+
+                        using var grace = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                        try
+                        {
+                            var terminator = await reader.ReadLineAsync(grace.Token);
+                            if (terminator is not null)
+                            {
+                                rawLines.Add(terminator);
+                            }
+                        }
+                        catch (OperationCanceledException)
+                        {
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+
+        var rawDump = string.Join("\n", rawLines);
+        Assert.True(
+            dataLine is not null,
+            $"""no webhook event received. Raw stream ({rawLines.Count} lines):{rawDump}""");
+        Assert.Equal("", rawLines[^1]);
+        using var payload = JsonDocument.Parse(dataLine!);
+        Assert.Equal("POST", payload.RootElement.GetProperty("method").GetString());
+        Assert.True(Guid.TryParse(payload.RootElement.GetProperty("id").GetString(), out _));
+        Assert.False(string.IsNullOrEmpty(payload.RootElement.GetProperty("receivedAt").GetString()));
+        Assert.Contains("event: webhook", rawLines);
+        Assert.Contains(rawLines, line => line.StartsWith("id: ", StringComparison.Ordinal));
+    }
+
+
     private static string NewSlug() => $"it-{Guid.NewGuid():N}";
 
     private static string NewSlug(string prefix) => $"{prefix}-{Guid.NewGuid():N}";
