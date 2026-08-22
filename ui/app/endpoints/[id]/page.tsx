@@ -37,11 +37,14 @@ export default async function EndpointPage({
   }
 
   let firstPage: WebhooksPage = { items: [], nextBefore: null };
+  let feedFailed = false;
   try {
     firstPage = await serverGet<WebhooksPage>(
       `/api/endpoints/${id}/webhooks`,
     );
-  } catch {}
+  } catch {
+    feedFailed = true;
+  }
 
   return (
     <>
@@ -60,6 +63,11 @@ export default async function EndpointPage({
           target: <span className="mono">{endpoint.forwardUrl}</span>
         </p>
       </div>
+      {feedFailed && (
+        <div className="error-banner">
+          Could not load captured requests. Is the API running on port 5000?
+        </div>
+      )}
       <WebhookFeed endpointId={endpoint.id} initialPage={firstPage} />
     </>
   );
