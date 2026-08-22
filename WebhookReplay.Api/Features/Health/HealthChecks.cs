@@ -4,7 +4,7 @@ using Npgsql;
 
 namespace WebhookReplay.Api.Features.Health;
 
-public sealed class DbHealthCheck(NpgsqlDataSource dataSource) : IHealthCheck
+public sealed class DbHealthCheck(NpgsqlDataSource dataSource, ILogger<DbHealthCheck> logger) : IHealthCheck
 {
     public async Task<HealthCheckResult> CheckHealthAsync(
         HealthCheckContext context,
@@ -19,7 +19,8 @@ public sealed class DbHealthCheck(NpgsqlDataSource dataSource) : IHealthCheck
         }
         catch (Exception exception)
         {
-            return HealthCheckResult.Unhealthy(exception.Message, exception);
+            logger.LogError(exception, "Database health check failed.");
+            return HealthCheckResult.Unhealthy("Database unavailable");
         }
     }
 }
