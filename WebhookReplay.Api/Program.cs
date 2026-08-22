@@ -3,6 +3,7 @@ using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using WebhookReplay.Api.Features.Deliveries;
 using WebhookReplay.Api.Features.Endpoints;
+using WebhookReplay.Api.Features.Health;
 using WebhookReplay.Api.Features.Webhooks;
 using WebhookReplay.Api.Infrastructure;
 
@@ -18,8 +19,11 @@ builder.WebHost.ConfigureKestrel(options =>
 builder.Services.AddOpenApi();
 
 builder.Services.AddIngestRateLimiting(builder.Configuration);
+builder.Services.AddWebhookHealthChecks();
 
 builder.Services.AddHttpClient();
+
+builder.Services.AddWebhookRetention(builder.Configuration);
 
 builder.Services.AddSingleton<NpgsqlDataSource>(sp =>
 {
@@ -57,5 +61,8 @@ app.MapGet("/api/endpoints/{endpointId}/webhooks", ListWebhooks.HandleAsync);
 app.MapGet("/api/webhooks/{id}", GetWebhook.HandleAsync);
 app.MapPost("/api/webhooks/{id}/replay", ReplayWebhook.HandleAsync);
 app.MapGet("/api/webhooks/{id}/attempts", GetDeliveryAttempts.HandleAsync);
+app.MapWebhookHealthEndpoints();
 
 app.Run();
+
+public partial class Program { }
