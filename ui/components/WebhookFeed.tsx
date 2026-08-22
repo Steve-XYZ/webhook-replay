@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { formatInstant, type WebhookSummary, type WebhooksPage } from "@/lib/api";
 
 type Props = {
@@ -16,15 +16,80 @@ export default function WebhookFeed({ endpointId, initialPage }: Props) {
   );
   const [refreshing, setRefreshing] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [activeQuery, setActiveQuery] = useState("");
+  const [live, setLive] = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+
+  useEffect(() => () => clearTimeout(debounceRef.current), []);
+
+  function feedUrl(q: string, before?: string | null): string {
+    const params = new URLSearchParams();
+    if (q !== "") params.set("q", q);
+    if (before) params.set("before", before);
+    const suffix = params.toString();
+    return `/api/endpoints/${endpointId}/webhooks${suffix ? `?${suffix}` : ""}`;
+  }
+
+  async function fetchFirstPage(q: string) {
+    setSearching(true);
+    setError(null);
+    try {
+      const res = await fetch(feedUrl(q), { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const page = (await res.json()) as WebhooksPage;
+      setItems(page.items);
+      setNextBefore(page.nextBefore);
+    } catch {
+      setError("Could not search the feed.");
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  function handleSearchChange(event: ChangeEvent<HTMLInputElement>) {
+    const value = event.target.value;
+    setQuery(value);
+    clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      const trimmed = value.trim();
+      setActiveQuery(trimmed);
+      fetchFirstPage(trimmed);
+    }, 300);
+  }
+
+  useEffect(() => {
+    const source = new EventSource(`/api/endpoints/${endpointId}/events`);
+
+    source.addEventListener("open", () => setLive(true));
+    source.addEventListener("error", () => setLive(false));
+    source.addEventListener("webhook", (event) => {
+      try {
+        const item = JSON.parse(
+          (event as MessageEvent<string>).data,
+        ) as WebhookSummary;
+        setItems((prev) =>
+          prev.some((existing) => existing.id === item.id) || activeQuery !== ""
+            ? prev
+            : [item, ...prev],
+        );
+      } catch {
+        return;
+      }
+    });
+
+    return () => source.close();
+  }, [endpointId, activeQuery]);
 
   async function refresh() {
     setRefreshing(true);
     setError(null);
     try {
-      const res = await fetch(`/api/endpoints/${endpointId}/webhooks`, {
-        cache: "no-store",
-      });
+      const res = await fetch(feedUrl(activeQuery), { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const page = (await res.json()) as WebhooksPage;
       setItems(page.items);
@@ -41,10 +106,9 @@ export default function WebhookFeed({ endpointId, initialPage }: Props) {
     setLoadingOlder(true);
     setError(null);
     try {
-      const res = await fetch(
-        `/api/endpoints/${endpointId}/webhooks?before=${encodeURIComponent(nextBefore)}`,
-        { cache: "no-store" },
-      );
+      const res = await fetch(feedUrl(activeQuery, nextBefore), {
+        cache: "no-store",
+      });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const page = (await res.json()) as WebhooksPage;
       setItems((prev) => [...prev, ...page.items]);
@@ -65,20 +129,41 @@ export default function WebhookFeed({ endpointId, initialPage }: Props) {
           alignItems: "center",
         }}
       >
-        <h2>Requests ({items.length})</h2>
+        <h2>
+          Requests ({items.length})
+          {activeQuery !== "" && " matching search"}
+          <span
+            className={`live-dot ${live ? "on" : ""}`}
+            title={live ? "Live updates connected" : "Live feed connecting…"}
+            aria-label={live ? "Live" : "Connecting"}
+          />
+        </h2>
         <button
           type="button"
           className="btn"
           onClick={refresh}
-          disabled={refreshing}
+          disabled={refreshing || searching}
         >
           {refreshing ? "Refreshing…" : "Refresh"}
         </button>
       </div>
+      <input
+        type="search"
+        className="input"
+        placeholder="Search body text…"
+        aria-label="Search request bodies"
+        value={query}
+        onChange={handleSearchChange}
+        style={{ margin: "8px 0" }}
+      />
       {error && <div className="error-banner">{error}</div>}
       {items.length === 0 ? (
         <p className="empty-state">
-          No requests captured yet. Fire one at the ingest URL above.
+          {activeQuery !== "" ? (
+            <>No requests match &ldquo;{query}&rdquo;.</>
+          ) : (
+            <>No requests captured yet. Fire one at the ingest URL above.</>
+          )}
         </p>
       ) : (
         items.map((wh) => (
@@ -97,7 +182,7 @@ export default function WebhookFeed({ endpointId, initialPage }: Props) {
             type="button"
             className="btn"
             onClick={loadOlder}
-            disabled={loadingOlder}
+            disabled={loadingOlder || searching}
           >
             {loadingOlder ? "Loading…" : "Load older"}
           </button>

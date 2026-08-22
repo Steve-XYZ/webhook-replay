@@ -13,6 +13,7 @@ public static class ListWebhooks
         SELECT id, method, body_text, received_at
         FROM webhook_requests
         WHERE endpoint_id = @endpoint_id AND (@before IS NULL OR received_at < @before)
+          AND (@q IS NULL OR body_text ILIKE '%' || @q || '%')
         ORDER BY received_at DESC
         LIMIT @limit
         """;
@@ -21,6 +22,7 @@ public static class ListWebhooks
         string endpointId,
         int? limit,
         DateTime? before,
+        string? q,
         NpgsqlDataSource dataSource,
         CancellationToken cancellationToken)
     {
@@ -52,6 +54,8 @@ public static class ListWebhooks
             beforeUtc = beforeUtc.Value.ToUniversalTime();
         }
 
+        var effectiveQuery = string.IsNullOrWhiteSpace(q) ? null : EscapeLikePattern(q);
+
         var items = new List<object>();
         DateTime? lastReceivedAt = null;
 
@@ -59,6 +63,7 @@ public static class ListWebhooks
         command.Parameters.Add("endpoint_id", NpgsqlDbType.Uuid).Value = endpointGuid;
         command.Parameters.Add("before", NpgsqlDbType.TimestampTz).Value =
             beforeUtc.HasValue ? beforeUtc.Value : DBNull.Value;
+        command.Parameters.Add("q", NpgsqlDbType.Text).Value = effectiveQuery ?? (object)DBNull.Value;
         command.Parameters.Add("limit", NpgsqlDbType.Integer).Value = effectiveLimit;
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -82,6 +87,9 @@ public static class ListWebhooks
             nextBefore = items.Count == effectiveLimit ? lastReceivedAt : null
         });
     }
+
+    private static string EscapeLikePattern(string value) =>
+        value.Replace(@"\", @"\\").Replace("%", @"\%").Replace("_", @"\_");
 
     private static async Task<bool> EndpointExistsAsync(
         NpgsqlConnection connection,
