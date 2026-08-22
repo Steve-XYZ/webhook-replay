@@ -1,0 +1,7 @@
+# Supresiones de ContractWatch para este repo.
+# Formato por linea: <tokens de regla/ruta separados por espacios> -- motivo
+# Las lineas que empiezan con # son comentarios. Sin entradas activas = sin supresiones.
+#
+# Ejemplos (quitar el # para activar):
+# endpoint-removed /api/endpoints/{id} -- endpoint deprecado acordado con el equipo UI
+# response-property-removed /api/webhooks/{id} -- campo renombrado, consumidores notificados en v2

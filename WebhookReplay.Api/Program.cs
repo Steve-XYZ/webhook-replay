@@ -44,10 +44,7 @@ builder.Services.AddOpenTelemetry()
 
 var app = builder.Build();
 
-if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
-}
+app.MapOpenApi();
 
 await DbMigrations.ApplyAsync(app.Services.GetRequiredService<NpgsqlDataSource>(), app.Logger);
 
