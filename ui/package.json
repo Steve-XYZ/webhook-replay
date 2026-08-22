@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "gen:types": "openapi-typescript http://localhost:5000/openapi/v1.json -o lib/api-types.ts"
+    "gen:types": "openapi-typescript ${OPENAPI_URL:-http://localhost:5000/openapi/v1.json} -o lib/api-types.ts"
   },
   "dependencies": {
     "next": "16.3.2",
