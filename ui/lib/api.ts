@@ -1,4 +1,8 @@
+import { type components } from "./api-types";
+
 const API_BASE = process.env.API_BASE ?? "http://localhost:5000";
+
+export type CreateEndpointBody = components["schemas"]["Request"];
 
 export type Endpoint = {
   id: string;
