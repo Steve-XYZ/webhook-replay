@@ -59,6 +59,7 @@ app.MapPost("/api/endpoints", CreateEndpoint.HandleAsync);
 app.MapGet("/api/endpoints", ListEndpoints.HandleAsync);
 app.MapGet("/api/endpoints/{id}", GetEndpoint.HandleAsync);
 app.MapGet("/api/endpoints/{endpointId}/webhooks", ListWebhooks.HandleAsync);
+app.MapGet("/api/endpoints/{endpointId}/events", StreamWebhookEvents.HandleAsync);
 app.MapGet("/api/webhooks/{id}", GetWebhook.HandleAsync);
 app.MapPost("/api/webhooks/{id}/replay", ReplayWebhook.HandleAsync);
 app.MapGet("/api/webhooks/{id}/attempts", GetDeliveryAttempts.HandleAsync);

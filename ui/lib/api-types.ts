@@ -140,6 +140,7 @@ export interface paths {
                 query?: {
                     limit?: number | string;
                     before?: string;
+                    q?: string;
                 };
                 header?: never;
                 path: {
@@ -279,6 +280,7 @@ export interface components {
             name: string;
             slug: string;
             forwardUrl: string;
+            secret?: string;
         };
     };
     responses: never;

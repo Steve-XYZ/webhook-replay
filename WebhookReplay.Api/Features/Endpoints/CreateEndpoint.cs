@@ -9,11 +9,11 @@ public static class CreateEndpoint
     private const string SlugPattern = "\\A[a-z0-9-]+\\z";
 
     private const string InsertSql = """
-        INSERT INTO endpoints (id, name, slug, forward_url, created_at)
-        VALUES (@id, @name, @slug, @forward_url, @created_at)
+        INSERT INTO endpoints (id, name, slug, forward_url, secret, created_at)
+        VALUES (@id, @name, @slug, @forward_url, @secret, @created_at)
         """;
 
-    public sealed record Request(string Name, string Slug, string ForwardUrl);
+    public sealed record Request(string Name, string Slug, string ForwardUrl, string? Secret = null);
 
     public static async Task<IResult> HandleAsync(
         Request request,
@@ -38,6 +38,7 @@ public static class CreateEndpoint
 
         var id = Guid.CreateVersion7();
         var createdAt = DateTime.UtcNow;
+        var secret = string.IsNullOrWhiteSpace(request.Secret) ? null : request.Secret.Trim();
 
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = new NpgsqlCommand(InsertSql, connection);
@@ -45,6 +46,7 @@ public static class CreateEndpoint
         command.Parameters.Add("name", NpgsqlDbType.Text).Value = request.Name;
         command.Parameters.Add("slug", NpgsqlDbType.Text).Value = request.Slug;
         command.Parameters.Add("forward_url", NpgsqlDbType.Text).Value = request.ForwardUrl;
+        command.Parameters.Add("secret", NpgsqlDbType.Text).Value = (object?)secret ?? DBNull.Value;
         command.Parameters.Add("created_at", NpgsqlDbType.TimestampTz).Value = createdAt;
 
         try
@@ -62,6 +64,7 @@ public static class CreateEndpoint
             name = request.Name,
             slug = request.Slug,
             forwardUrl = request.ForwardUrl,
+            secret,
             createdAt
         });
     }
