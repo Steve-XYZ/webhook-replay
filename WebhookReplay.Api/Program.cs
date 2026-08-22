@@ -61,3 +61,5 @@ app.MapGet("/api/webhooks/{id}/attempts", GetDeliveryAttempts.HandleAsync);
 app.MapWebhookHealthEndpoints();
 
 app.Run();
+
+public partial class Program { }
