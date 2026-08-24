@@ -1,0 +1,61 @@
+name: api-compatibility
+
+on: [pull_request]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contractwatch:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Generate OpenAPI spec
+        run: ./scripts/generate-openapi.sh
+        env:
+          ConnectionStrings__Default: Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password=postgres
+
+      - name: Base contract available?
+        id: has-base
+        shell: bash
+        run: |
+          if git cat-file -e "origin/${{ github.base_ref }}:openapi.json" 2>/dev/null; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compare contracts
+        uses: Steve-XYZ/contract-watch@main
+        if: steps.has-base.outputs.available == 'true'
+        with:
+          base-spec: openapi.json
+          head-spec: openapi.json
+
+      - name: Primer analisis pendiente
+        if: steps.has-base.outputs.available == 'false'
+        run: echo "::notice::Sin openapi.json en la rama base; el gate queda activo desde el proximo PR."
