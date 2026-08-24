@@ -11,6 +11,8 @@ public static class ReplayWebhook
 {
     private const int MaxResponseBytes = 65537;
     private const int MaxResponseChars = 65536;
+    private const double MaxBackoffDelaySeconds = 10;
+    private const double TotalBackoffBudgetSeconds = 15;
 
     private const string TargetUrlError = "Target URL must be an absolute http(s) URL.";
 
@@ -31,6 +33,7 @@ public static class ReplayWebhook
         HttpRequest request,
         NpgsqlDataSource dataSource,
         IHttpClientFactory httpClientFactory,
+        ReplayRetryOptions retries,
         CancellationToken cancellationToken)
     {
         if (!Guid.TryParse(id, out var requestId))
@@ -63,10 +66,54 @@ public static class ReplayWebhook
             return Results.BadRequest(new { error = TargetUrlError });
         }
 
-        return await SendAndRecordAsync(connection, requestId, payload, httpClientFactory, cancellationToken);
+        return await SendWithRetriesAsync(connection, requestId, payload, httpClientFactory, retries, cancellationToken);
     }
 
     internal sealed record EffectivePayload(string Method, string TargetUrl, JsonElement Headers, string BodyText);
+
+    private sealed record SendResult(IResult Response, int? StatusCode);
+
+    private static async Task<IResult> SendWithRetriesAsync(
+        NpgsqlConnection connection,
+        Guid requestId,
+        EffectivePayload payload,
+        IHttpClientFactory httpClientFactory,
+        ReplayRetryOptions retries,
+        CancellationToken cancellationToken)
+    {
+        var remainingBudgetSeconds = TotalBackoffBudgetSeconds;
+        for (var attemptNumber = 1; ; attemptNumber++)
+        {
+            var outcome = await SendAndRecordAsync(connection, requestId, payload, httpClientFactory, cancellationToken);
+            if (attemptNumber >= retries.MaxAttempts ||
+                (outcome.StatusCode is not null && outcome.StatusCode < 500) ||
+                (retries.BackoffBaseSeconds > 0 && remainingBudgetSeconds <= 0))
+            {
+                return outcome.Response;
+            }
+
+            var delaySeconds = ComputeDelaySeconds(attemptNumber, retries.BackoffBaseSeconds, ref remainingBudgetSeconds);
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(delaySeconds), cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return outcome.Response;
+            }
+        }
+    }
+
+    private static double ComputeDelaySeconds(
+        int attemptNumber,
+        int backoffBaseSeconds,
+        ref double remainingBudgetSeconds)
+    {
+        var exponentialSeconds = Math.Min(backoffBaseSeconds * Math.Pow(2, attemptNumber - 1), MaxBackoffDelaySeconds);
+        var delaySeconds = Math.Min(exponentialSeconds, Math.Max(0, remainingBudgetSeconds));
+        remainingBudgetSeconds -= delaySeconds;
+        return delaySeconds;
+    }
 
     private sealed record StoredRequest(string Method, JsonElement Headers, string BodyText, string ForwardUrl);
 
@@ -134,7 +181,7 @@ public static class ReplayWebhook
         Uri.TryCreate(url, UriKind.Absolute, out var uri) &&
         (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
 
-    private static async Task<IResult> SendAndRecordAsync(
+    private static async Task<SendResult> SendAndRecordAsync(
         NpgsqlConnection connection,
         Guid requestId,
         EffectivePayload payload,
@@ -164,8 +211,10 @@ public static class ReplayWebhook
                 connection, attemptId, requestId, payload.TargetUrl, statusCode, responseBody,
                 stopwatch.ElapsedMilliseconds, attemptedAt, payload, CancellationToken.None);
 
-            return Results.Ok(SerializeAttempt(attemptId, payload, statusCode, responseBody,
-                stopwatch.ElapsedMilliseconds, attemptedAt));
+            return new SendResult(
+                Results.Ok(SerializeAttempt(attemptId, payload, statusCode, responseBody,
+                    stopwatch.ElapsedMilliseconds, attemptedAt)),
+                statusCode);
         }
         catch (Exception ex) when ((ex is OperationCanceledException or HttpRequestException)
                                    && !cancellationToken.IsCancellationRequested)
@@ -248,7 +297,7 @@ public static class ReplayWebhook
         return responseBody.Length > MaxResponseChars ? responseBody[..MaxResponseChars] : responseBody;
     }
 
-    private static async Task<IResult> RecordFailedAttemptAsync(
+    private static async Task<SendResult> RecordFailedAttemptAsync(
         NpgsqlConnection connection,
         Guid requestId,
         EffectivePayload payload,
@@ -259,9 +308,11 @@ public static class ReplayWebhook
         await InsertAttemptAsync(connection, attemptId, requestId, payload.TargetUrl, null, null,
             durationMs, attemptedAt, payload, CancellationToken.None);
 
-        return Results.Json(
-            SerializeAttempt(attemptId, payload, null, null, durationMs, attemptedAt),
-            statusCode: 502);
+        return new SendResult(
+            Results.Json(
+                SerializeAttempt(attemptId, payload, null, null, durationMs, attemptedAt),
+                statusCode: 502),
+            null);
     }
 
     private static object SerializeAttempt(

@@ -13,6 +13,8 @@ public sealed class ApiFixture : WebApplicationFactory<Program>, IAsyncLifetime
 
     public Task InitializeAsync() => _db.StartAsync();
 
+    public string ConnectionString => _db.GetConnectionString();
+
     public new async Task DisposeAsync()
     {
         await _db.DisposeAsync();
